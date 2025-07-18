@@ -4,7 +4,9 @@
 #include <ESPmDNS.h>
 #include "HX711.h" // Reverted to HX711.h
 #include <ESP32Servo.h>
-#include <WebSocketsServer.h> // Added for real-time data streaming
+#include <WebSocketsServer.h> 
+
+// Added for real-time data streaming
 
 // --- Load cell pins and calibration ---
 #define DT 3
