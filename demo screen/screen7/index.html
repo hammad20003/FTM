@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Process Mode</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Header -->
+    <div class="header">
+        <span class="back-button">&#8592;</span>
+        <h1>Process Mode</h1>
+        <span class="close-button">✖</span>
+    </div>
+
+    <!-- Main Section -->
+    <div class="process-container">
+        <!-- Left Panel -->
+        <div class="left-panel">
+            <h3>User-Defined Values</h3>
+            <p><strong>Name:</strong> wwe</p>
+            <p><strong>Time:</strong> 15 <span class="unit">s</span></p>
+            <p><strong>Voltage:</strong> 21 <span class="unit">V</span></p>
+            <p><strong>Current:</strong> 2 <span class="unit">A</span></p>
+            <p><strong>Distance:</strong> 14 <span class="unit">mm</span></p>
+        </div>
+
+        <!-- Center Display -->
+        <div class="display-panel"></div>
+
+        <!-- Right Panel -->
+        <div class="right-panel">
+            <h3>Real-Time Values</h3>
+            <div class="value-block"><strong>Supply</strong> ON</div>
+            <div class="value-block"><strong>Voltage</strong> -- <span class="unit">V</span></div>
+            <div class="value-block"><strong>Current</strong> -- <span class="unit">A</span></div>
+            <div class="value-block"><strong>Status</strong> Ready</div>
+            <div class="remaining-block">
+                <strong>Remaining Time</strong>
+                <div class="timer">00 : 00</div>
+                <small>MM : SS</small>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bottom Buttons -->
+    <div class="button-row">
+        <button class="btn start">START</button>
+        <button class="btn pause">PAUSE</button>
+        <button class="btn stop">STOP</button>
+    </div>
+</body>
+</html>

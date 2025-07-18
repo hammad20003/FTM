@@ -1,0 +1,120 @@
+/* Reset & Base Styles */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html, body {
+    height: 100%;
+    font-family: Arial, sans-serif;
+    background-color: #eaf0f4;
+}
+
+/* Header Logo */
+.header {
+    background-color: #fff;
+    padding: 10px 30px;
+    display: flex;
+    align-items: center;
+}
+
+.logo {
+    height: 45px;
+}
+
+/* Main Section */
+.main-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: calc(100vh - 70px);
+    padding: 0 20px;
+    gap: 60px;
+    flex-wrap: wrap;
+}
+
+/* Login Panel */
+.login-box {
+    background-color: white;
+    border-radius: 20px;
+    padding: 30px;
+    width: 320px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    display: flex;
+    flex-direction: column;
+}
+
+.login-box label {
+    font-size: 16px;
+    margin-top: 15px;
+    color: #000;
+}
+
+.required {
+    color: red;
+    margin-left: 3px;
+}
+
+.login-box input {
+    margin-top: 6px;
+    padding: 10px;
+    font-size: 15px;
+    border-radius: 5px;
+    border: 1px solid #ccc;
+}
+
+.login-btn {
+    margin-top: 20px;
+    background-color: #084e9d;
+    color: white;
+    border: none;
+    padding: 12px;
+    font-size: 16px;
+    font-weight: bold;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+/* Info Panel */
+.info-box {
+    max-width: 480px;
+    padding: 10px;
+}
+
+.info-box h1 {
+    font-size: 42px;
+    color: #2b2b2b;
+}
+
+.info-box h2 {
+    font-size: 22px;
+    color: #1a76b1;
+    margin: 10px 0;
+}
+
+.info-box p {
+    font-size: 16px;
+    color: #2b2b2b;
+    line-height: 1.6;
+    margin-top: 10px;
+}
+
+.info-box .copyright {
+    font-size: 13px;
+    color: gray;
+    margin-top: 30px;
+}
+
+/* Responsive Layout */
+@media (max-width: 768px) {
+    .main-container {
+        flex-direction: column;
+        height: auto;
+        padding: 40px 20px;
+    }
+
+    .info-box {
+        text-align: center;
+    }
+}

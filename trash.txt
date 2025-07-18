@@ -1,0 +1,277 @@
+#include <WiFiManager.h>             // WiFiManager for Wi-Fi setup
+#include <ESPAsyncWebServer.h>       // Async server
+#include <AsyncTCP.h>                // Required for WebSocket
+#include <ESPmDNS.h>                 // mDNS responder
+
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");           // WebSocket endpoint
+
+void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
+  AwsFrameInfo *info = (AwsFrameInfo*)arg;
+
+  if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
+    String message = String((char*)data);
+    Serial.println("Received from app: " + message);
+
+    if (message == "led:on") {
+      digitalWrite(2, HIGH);
+      ws.textAll("LED is ON");
+    } else if (message == "led:off") {
+      digitalWrite(2, LOW);
+      ws.textAll("LED is OFF");
+    }
+  }
+}
+
+void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
+                      AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    Serial.println("🟢 App connected via WebSocket");
+    client->text("Connected to ESP32");
+  } else if (type == WS_EVT_DISCONNECT) {
+    Serial.println("🔴 App disconnected");
+  } else if (type == WS_EVT_DATA) {
+    handleWebSocketMessage(arg, data, len);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(2, OUTPUT);  // Built-in LED or relay control pin
+
+  // WiFiManager setup
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(180); // Auto-close after 3 mins
+  bool res = wm.autoConnect("SmartBulb_Setup");
+
+  if (!res) {
+    Serial.println("❌ WiFi failed. Restarting...");
+    delay(3000);
+    ESP.restart();
+  }
+
+  Serial.println("✅ WiFi connected. IP: " + WiFi.localIP().toString());
+
+  // mDNS setup
+  if (MDNS.begin("esp32")) {
+    Serial.println("🌐 mDNS started: esp32.local");
+  } else {
+    Serial.println("⚠️ mDNS failed to start");
+  }
+
+  // WebSocket setup
+  ws.onEvent(onWebSocketEvent);
+  server.addHandler(&ws);
+
+  server.begin();
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <WebServer.h>
+#include <WebSocketsServer.h> // Make sure you have this library installed
+
+// Replace with your network credentials
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+
+// Create a WebSocket server on port 80 (default HTTP/WS port)
+WebSocketsServer webSocket = WebSocketsServer(80);
+
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+    switch(type) {
+        case WStype_DISCONNECTED:
+            Serial.printf("[%u] Disconnected!\n", num);
+            break;
+        case WStype_CONNECTED: {
+            IPAddress ip = webSocket.remoteIP(num);
+            Serial.printf("[%u] Connected from %d.%d.%d.%d url: %s\n", num, ip[0], ip[1], ip[2], ip[3], payload);
+            // Send a welcome message to the client
+            webSocket.sendTXT(num, "Hello from ESP32!");
+        }
+            break;
+        case WStype_TEXT:
+            Serial.printf("[%u] get Text: %s\n", num, payload);
+            // Echo back the received message
+            webSocket.sendTXT(num, String("Received: ") + (char*)payload);
+            break;
+        case WStype_BIN:
+            Serial.printf("[%u] get Binary length: %u\n", num, length);
+            // You can handle binary data here if needed
+            break;
+        case WStype_ERROR:
+        case WStype_FRAGMENT_TEXT_START:
+        case WStype_FRAGMENT_BIN_START:
+        case WStype_FRAGMENT:
+        case WStype_FRAGMENT_FIN:
+            break;
+    }
+}
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println();
+    Serial.print("Connecting to ");
+    Serial.println(ssid);
+
+    WiFi.begin(ssid, password);
+
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+
+    Serial.println("");
+    Serial.println("WiFi connected");
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());
+
+    webSocket.begin();
+    webSocket.onEvent(webSocketEvent);
+    Serial.println("WebSocket server started.");
+}
+
+void loop() {
+    webSocket.loop();
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#include <WiFiManager.h>             // WiFiManager for Wi-Fi setup
+#include <ESPAsyncWebServer.h>       // Async server
+#include <AsyncTCP.h>                // Required for WebSocket
+#include <ESPmDNS.h>                 // mDNS responder
+
+AsyncWebServer server(80);
+AsyncWebSocket ws("/ws");           // WebSocket endpoint
+
+void handleWebSocketMessage(void *arg, uint8_t *data, size_t len) {
+  AwsFrameInfo *info = (AwsFrameInfo*)arg;
+
+  if (info->final && info->index == 0 && info->len == len && info->opcode == WS_TEXT) {
+    String message = String((char*)data);
+    Serial.println("Received from app: " + message);
+
+    if (message == "led:on") {
+      digitalWrite(2, HIGH);
+      ws.textAll("LED is ON");
+    } else if (message == "led:off") {
+      digitalWrite(2, LOW);
+      ws.textAll("LED is OFF");
+    }
+  }
+}
+
+void onWebSocketEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
+                      AwsEventType type, void *arg, uint8_t *data, size_t len) {
+  if (type == WS_EVT_CONNECT) {
+    Serial.println("🟢 App connected via WebSocket");
+    client->text("Connected to ESP32");
+  } else if (type == WS_EVT_DISCONNECT) {
+    Serial.println("🔴 App disconnected");
+  } else if (type == WS_EVT_DATA) {
+    handleWebSocketMessage(arg, data, len);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(2, OUTPUT);  // Built-in LED or relay control pin
+
+  // WiFiManager setup
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(180); // Auto-close after 3 mins
+  bool res = wm.autoConnect("SmartBulb_Setup");
+
+  if (!res) {
+    Serial.println("❌ WiFi failed. Restarting...");
+    delay(3000);
+    ESP.restart();
+  }
+
+  Serial.println("✅ WiFi connected. IP: " + WiFi.localIP().toString());
+
+  // mDNS setup
+  if (MDNS.begin("esp32")) {
+    Serial.println("🌐 mDNS started: esp32.local");
+  } else {
+    Serial.println("⚠️ mDNS failed to start");
+  }
+
+  // WebSocket setup
+  ws.onEvent(onWebSocketEvent);
+  server.addHandler(&ws);
+
+  server.begin();
+  Serial.println("🚀 Server ready at ws://esp32.local/ws");
+}
+
+void loop() {
+  // Nothing needed here — Async server handles it all
+}
+
+
+  Serial.println("🚀 Server ready at ws://esp32.local/ws");
+}
+
+void loop() {
+  // Nothing needed here — Async server handles it all
+}

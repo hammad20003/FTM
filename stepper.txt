@@ -1,0 +1,247 @@
+// Stepper Motor Distance Tracker (400 steps per revolution)
+
+// --- Pin Definitions ---
+const int STEP_PIN = 19;
+const int DIR_PIN = 18;
+const int ENABLE_PIN = 5;
+
+// --- Motion Parameters ---
+const int stepsPerRevolution = 400;          // Your setup: 1 rotation = 400 steps
+float distancePerStep = 9.11 / 400;          // ≈ 0.022775 cm per step
+
+long totalStepsMoved = 0;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Stepper Tube Distance Tracker (400 Step Mode)");
+
+  pinMode(STEP_PIN, OUTPUT);
+  pinMode(DIR_PIN, OUTPUT);
+  pinMode(ENABLE_PIN, OUTPUT);
+
+  digitalWrite(ENABLE_PIN, LOW); // Enable driver
+}
+
+void loop() {
+  // Forward (clockwise)
+  Serial.println("Pushing tube forward...");
+  digitalWrite(DIR_PIN, LOW);
+
+  for (int i = 0; i < stepsPerRevolution; i++) {
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(500);
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(500);
+    totalStepsMoved++;
+  }
+
+  float totalDistance = totalStepsMoved * distancePerStep;
+  Serial.print("Tube pushed: ");
+  Serial.print(totalDistance, 2);
+  Serial.println(" cm");
+
+  delay(2000);
+
+  // Backward (counterclockwise)
+  Serial.println("Pulling tube back...");
+  digitalWrite(DIR_PIN, HIGH);
+
+  for (int i = 0; i < stepsPerRevolution; i++) {
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(500);
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(500);
+    totalStepsMoved--;
+  }
+
+  totalDistance = totalStepsMoved * distancePerStep;
+
+  Serial.print("Tube pushed: ");
+  Serial.print(totalDistance, 2);
+  Serial.println(" cm");
+
+  delay(3000);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Stepper Motor Distance Tracker (TB6600 + ESP32 + ENABLE pin logic inverted)
+
+// --- Pin Definitions ---
+const int STEP_PIN = 19;
+const int DIR_PIN = 18;
+const int ENABLE_PIN = 5; // ENA- on TB6600
+
+// --- Motion Parameters ---
+const int stepsPerRevolution = 400;           // 400 steps per full rotation (half-step mode)
+float distancePerStep = 9.11 / 400.0;          // ≈ 0.02278 cm per step (based on 2.9 cm wheel)
+
+long totalStepsMoved = 0;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Stepper Distance Tracker with INVERTED Enable");
+
+  pinMode(STEP_PIN, OUTPUT);
+  pinMode(DIR_PIN, OUTPUT);
+  pinMode(ENABLE_PIN, OUTPUT);
+
+  digitalWrite(ENABLE_PIN, LOW); // Initially disabled (inverted logic)
+}
+
+void loop() {
+  // ENABLE motor (inverted logic: HIGH = enabled)
+  digitalWrite(ENABLE_PIN, HIGH);
+  delay(10);
+
+  // --- Move Forward (Clockwise) ---
+  Serial.println("Pushing tube forward...");
+  digitalWrite(DIR_PIN, LOW);
+
+  for (int i = 0; i < stepsPerRevolution; i++) {
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(500);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(500);
+    totalStepsMoved++;
+  }
+
+  float totalDistance = totalStepsMoved * distancePerStep;
+  Serial.print("Tube pushed: ");
+  Serial.print(totalDistance, 2);
+  Serial.println(" cm");
+
+  delay(2000);
+
+  // --- Move Backward (Counter-Clockwise) ---
+  Serial.println("Pulling tube back...");
+  digitalWrite(DIR_PIN, HIGH);
+
+  for (int i = 0; i < stepsPerRevolution; i++) {
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(500);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(500);
+    totalStepsMoved--;
+  }
+
+  totalDistance = totalStepsMoved * distancePerStep;
+  Serial.print("Tube pushed: ");
+  Serial.print(totalDistance, 2);
+  Serial.println(" cm");
+
+  // DISABLE motor (inverted logic: LOW = disabled)
+  digitalWrite(ENABLE_PIN, LOW);
+  Serial.println("Motor disabled to prevent heating.\n");
+
+  delay(3000);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Stepper Motor Distance Tracker (TB6600 + ESP32 + ENABLE pin logic inverted)
+
+// --- Pin Definitions ---
+const int STEP_PIN = 19;
+const int DIR_PIN = 18;
+const int ENABLE_PIN = 5; // ENA- on TB6600
+
+// --- Motion Parameters ---
+const int stepsPerRevolution = 400;           // 400 steps per full rotation (half-step mode)
+float distancePerStep = 9.11 / 400.0;          // ≈ 0.02278 cm per step (based on 2.9 cm wheel)
+
+long totalStepsMoved = 0;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("Stepper Distance Tracker with INVERTED Enable");
+
+  pinMode(STEP_PIN, OUTPUT);
+  pinMode(DIR_PIN, OUTPUT);
+  pinMode(ENABLE_PIN, OUTPUT);
+
+  digitalWrite(ENABLE_PIN, LOW); // Initially disabled (inverted logic)
+}
+
+void loop() {
+  // ENABLE motor (inverted logic: HIGH = enabled)
+  digitalWrite(ENABLE_PIN, HIGH);
+  delay(10);
+
+  // --- Move Forward (Clockwise) ---
+  Serial.println("Pushing tube forward...");
+  digitalWrite(DIR_PIN, LOW);
+
+  for (int i = 0; i < stepsPerRevolution; i++) {
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(500);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(500);
+    totalStepsMoved++;
+  }
+
+  float totalDistance = totalStepsMoved * distancePerStep;
+  Serial.print("Tube pushed: ");
+  Serial.print(totalDistance, 2);
+  Serial.println(" cm");
+
+  delay(2000);
+
+  // --- Move Backward (Counter-Clockwise) ---
+  Serial.println("Pulling tube back...");
+  digitalWrite(DIR_PIN, HIGH);
+
+  for (int i = 0; i < stepsPerRevolution; i++) {
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(500);
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(500);
+    totalStepsMoved--;
+  }
+
+  totalDistance = totalStepsMoved * distancePerStep;
+  Serial.print("Tube pushed: ");
+  Serial.print(totalDistance, 2);
+  Serial.println(" cm");
+
+  // DISABLE motor (inverted logic: LOW = disabled)
+  digitalWrite(ENABLE_PIN, LOW);
+  Serial.println("Motor disabled to prevent heating.\n");
+
+  delay(3000);
+}
+

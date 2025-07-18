@@ -1,0 +1,132 @@
+/* Reset */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html, body {
+    height: 100%;
+    font-family: Arial, sans-serif;
+    background-color: #eaf0f4;
+}
+
+/* Header */
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: white;
+    padding: 10px 30px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+}
+
+.header h1 {
+    font-size: 24px;
+    font-weight: bold;
+}
+
+.back-button {
+    font-size: 24px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.close-button {
+    font-size: 20px;
+    background-color: red;
+    color: white;
+    border-radius: 50%;
+    width: 30px;
+    height: 30px;
+    text-align: center;
+    line-height: 30px;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+/* Main Layout */
+.delete-container {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: flex-start;
+    gap: 40px;
+    padding: 40px;
+}
+
+/* Left Panel */
+.left-panel {
+    flex: 1;
+    min-width: 250px;
+    display: flex;
+    justify-content: center;
+}
+
+.select-config-btn {
+    padding: 14px 25px;
+    font-size: 16px;
+    font-weight: bold;
+    border: 1px solid #ccc;
+    background: linear-gradient(to bottom, #ffffff, #f0f0f0);
+    color: #0a65b9;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+/* Right Panel */
+.right-panel {
+    flex: 1;
+    min-width: 280px;
+    max-width: 400px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+}
+
+.form-group label {
+    font-size: 16px;
+    margin-bottom: 6px;
+    display: block;
+    color: #444;
+}
+
+.form-group input {
+    width: 100%;
+    padding: 10px;
+    font-size: 15px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+}
+
+/* Delete Button */
+.delete-btn {
+    margin-top: 20px;
+    padding: 12px;
+    font-size: 16px;
+    font-weight: bold;
+    background-color: #a00000;
+    color: white;
+    border: none;
+    border-radius: 5px;
+    align-self: flex-end;
+    cursor: pointer;
+    width: 120px;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .delete-container {
+        flex-direction: column;
+        align-items: center;
+    }
+
+    .right-panel {
+        width: 100%;
+        max-width: 90%;
+    }
+
+    .delete-btn {
+        align-self: center;
+    }
+}

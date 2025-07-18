@@ -1,0 +1,114 @@
+/* Reset */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html, body {
+    height: 100%;
+    font-family: Arial, sans-serif;
+    background-color: #ffffff;
+}
+
+/* Header */
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background-color: white;
+    padding: 10px 30px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+}
+
+.header h1 {
+    font-size: 24px;
+    font-weight: bold;
+}
+
+.back-button {
+    font-size: 24px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.close-button {
+    font-size: 20px;
+    background-color: red;
+    color: white;
+    border-radius: 50%;
+    width: 30px;
+    height: 30px;
+    text-align: center;
+    line-height: 30px;
+    font-weight: bold;
+    cursor: pointer;
+}
+
+/* Main */
+.service-container {
+    height: calc(100vh - 60px);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background-color: #ffffff;
+}
+
+/* Actuator Box */
+.actuator-box {
+    background-color: #eaf0f4;
+    padding: 40px;
+    border-radius: 40px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 400px;
+}
+
+.actuator-box h2 {
+    font-size: 22px;
+    font-weight: bold;
+    margin-bottom: 30px;
+}
+
+/* Arrow Buttons */
+.arrow-buttons {
+    display: flex;
+    gap: 40px;
+}
+
+.circle-btn {
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    border: none;
+    background-color: #f3f6f9;
+    box-shadow: 2px 2px 8px rgba(0, 0, 0, 0.1);
+    font-size: 28px;
+    font-weight: bold;
+    color: #222;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.circle-btn:hover {
+    background-color: #e0e0e0;
+}
+
+/* Responsive */
+@media (max-width: 600px) {
+    .actuator-box {
+        min-width: 90%;
+        padding: 30px;
+    }
+
+    .circle-btn {
+        width: 50px;
+        height: 50px;
+        font-size: 24px;
+    }
+
+    .arrow-buttons {
+        gap: 30px;
+    }
+}

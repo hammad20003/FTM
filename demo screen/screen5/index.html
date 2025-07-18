@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Create Configuration</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Header -->
+    <div class="header">
+        <span class="back-button">&#8592;</span>
+        <h1>Create Configuration</h1>
+        <span class="close-button">✖</span>
+    </div>
+
+    <!-- Main Form Section -->
+    <div class="create-container">
+        <form class="config-form">
+            <div class="full-row">
+                <label>Configuration Name</label>
+                <input type="text" placeholder="Enter Configuration Name">
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Time (s)</label>
+                    <input type="number" placeholder="Enter Time (1 - 2000)">
+                </div>
+                <div class="form-group">
+                    <label>Distance (mm)</label>
+                    <input type="number" placeholder="Enter Distance (10 - 70)">
+                </div>
+            </div>
+
+            <div class="form-row">
+                <div class="form-group">
+                    <label>Voltage (V)</label>
+                    <input type="number" placeholder="Enter voltage (1 - 32)">
+                </div>
+                <div class="form-group">
+                    <label>Current (A)</label>
+                    <input type="number" placeholder="Enter current (1 - 10)">
+                </div>
+            </div>
+
+            <button class="create-btn" type="submit">Create</button>
+        </form>
+    </div>
+</body>
+</html>

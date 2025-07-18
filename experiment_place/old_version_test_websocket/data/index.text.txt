@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Save Text</title>
+</head>
+<body>
+  <h2>Enter Name:</h2>
+  <input id="nameInput" placeholder="Type here" />
+  <button onclick="save()">Save</button>
+
+  <h3>Saved Names:</h3>
+  <select id="nameList"></select>
+
+  <script>
+    let socket = new WebSocket("ws://" + location.hostname + "/ws");
+
+    function save() {
+      let input = document.getElementById("nameInput").value;
+      if (!input) return;
+      
+      socket.send(input);  // send to ESP32
+
+      // Save to localStorage
+      let list = JSON.parse(localStorage.getItem("savedList") || "[]");
+      list.push(input);
+      localStorage.setItem("savedList", JSON.stringify(list));
+      updateList(list);
+    }
+
+    function updateList(list) {
+      let dropdown = document.getElementById("nameList");
+      dropdown.innerHTML = "";
+      list.forEach(item => {
+        let opt = document.createElement("option");
+        opt.text = item;
+        dropdown.add(opt);
+      });
+    }
+
+    window.onload = () => {
+      let list = JSON.parse(localStorage.getItem("savedList") || "[]");
+      updateList(list);
+    };
+  </script>
+</body>
+</html>

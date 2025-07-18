@@ -1,0 +1,700 @@
+#include <WiFi.h>           // Standard ESP32 Wi-Fi library
+#include <WebServer.h>      // Library for creating a web server on ESP32
+#include <WiFiManager.h>    // Library for easy Wi-Fi configuration (auto-connect and captive portal)
+#include <ESPmDNS.h>        // Library for mDNS (allows accessing ESP32 by name like esp32.local)
+
+// Create a WebServer object on port 80 (standard HTTP port)
+WebServer server(80);
+// Removed ledPin definition as LED control is no longer needed
+
+// Global flag to track if mDNS was successfully started
+bool mDNSStarted = false;
+
+// --- Force Reading Simulation Variables ---
+const float slope = 0.6098;
+const float offset = -682.9268;
+int testADCValues[] = {1120, 1200, 1350, 1500, 2200, 1800, 1650, 2050, 2100, 1940};
+int totalTests = sizeof(testADCValues) / sizeof(testADCValues[0]);
+int currentIndex = 0; // Tracks which test ADC value to use next
+String forceHistory = ""; // Stores the history of force readings for web display
+
+// --- Physical Factory Reset Button Variables ---
+#define RESET_BUTTON_PIN 4 // GPIO pin for the physical reset button
+unsigned long buttonPressTime = 0;
+bool buttonPressed = false;
+
+// Function to simulate sending current force data
+void sendCurrentForce() {
+  if (currentIndex < totalTests) {
+    float force_grams = slope * testADCValues[currentIndex] + offset;
+    float force_newtons = force_grams * 0.00980665;
+
+    // Append the new force reading to the history string
+    forceHistory += String(currentIndex + 1) + ": " + String(force_newtons, 3) + " N\n";
+
+    Serial.println("Simulated force: " + String(force_newtons, 3) + " N");
+    currentIndex++;
+  } else {
+    Serial.println("All test values used for simulation.");
+    forceHistory += "--- All test values used ---\n";
+  }
+}
+
+void setup() {
+  // Initialize serial communication for debugging output
+  Serial.begin(115200);
+  Serial.println("\n--- ESP32 Force Simulation Setup ---"); // Updated setup message
+
+  // Removed LED pin configuration as LED control is no longer needed
+  // pinMode(ledPin, OUTPUT);
+  // digitalWrite(ledPin, LOW);
+
+  // Configure the physical reset button pin as input with pull-up resistor
+  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+
+  // Create a WiFiManager instance
+  WiFiManager wm;
+
+  // --- Phase 1: Attempt initial Wi-Fi connection using WiFiManager ("ESP32-Setup") ---
+  Serial.println("Starting Wi-Fi connection attempt with 'ESP32-Setup' portal fallback...");
+
+  // Set the timeout for the initial STA connection attempt within WiFiManager's autoConnect.
+  // If it can't connect to a saved network within this time, it starts its own AP.
+  // The autoConnect will block until connected or until its portal times out.
+  wm.setConfigPortalTimeout(40); // 40 seconds for STA connection attempt/portal interaction
+
+  // Try to auto-connect. If it fails to connect to a saved network,
+  // it will start an AP named "ESP32-Setup" for configuration.
+  bool connectedToRouter = wm.autoConnect("ESP32-Setup", "12345678");
+
+  if (connectedToRouter) {
+    // --- Scenario A: Successfully connected to a router (STA mode) ---
+    Serial.println("✅ Successfully connected to Wi-Fi!");
+    Serial.print("Local IP Address: ");
+    Serial.println(WiFi.localIP());
+
+    // Start mDNS service. This allows accessing ESP32 by name.
+    if (MDNS.begin("esp32")) {
+      Serial.println("🌐 mDNS responder started. Access at http://esp32.local");
+      mDNSStarted = true; // Set flag to true if mDNS started successfully
+    } else {
+      Serial.println("❌ mDNS setup failed. Access using IP address.");
+      mDNSStarted = false; // Set flag to false if mDNS failed
+    }
+  } else {
+    // --- Scenario B: Failed to connect to a router after autoConnect ---
+    // This means WiFiManager either couldn't connect to a saved network,
+    // or the user didn't configure it via the "ESP32-Setup" portal within its timeout.
+    // At this point, the ESP32 is currently in AP mode, broadcasting "ESP32-Setup".
+
+    Serial.println("❌ Failed to connect to Wi-Fi. Switching to 'ESP32-DirectConnect' AP mode.");
+
+    // Disconnect from the "ESP32-Setup" AP that WiFiManager started.
+    // This is crucial to allow us to start our own AP with a different name.
+    WiFi.softAPdisconnect(true);
+    delay(100); // Give it a moment to disconnect
+
+    // Now, explicitly start the "ESP32-DirectConnect" AP for direct control.
+    WiFi.mode(WIFI_AP); // Ensure AP mode is set
+    WiFi.softAP("ESP32-DirectConnect", "12345678"); // Start the AP with the desired name and password
+
+    Serial.println("Connect to 'ESP32-DirectConnect' Wi-Fi network (password: 12345678) on your device.");
+    Serial.print("Access Point IP: ");
+    Serial.println(WiFi.softAPIP());
+    mDNSStarted = false; // mDNS is not relevant in this direct AP mode
+  }
+
+  // --- Web Interface Setup ---
+  // Define the root URL ("/") handler
+  server.on("/", []() {
+    // Determine the access URL based on the current Wi-Fi mode and mDNS status
+    String accessUrl;
+    if (WiFi.getMode() == WIFI_AP) {
+      accessUrl = "http://192.168.4.1"; // Always the AP IP for direct connection
+    } else { // WIFI_STA mode (connected to a router)
+      if (mDNSStarted) {
+        accessUrl = "http://esp32.local"; // Use mDNS name if it started successfully
+      } else {
+        accessUrl = "http://" + WiFi.localIP().toString(); // Fallback to IP if mDNS failed
+      }
+    }
+
+    // Construct the HTML response for the main page
+    String html = "<!DOCTYPE html>";
+    html += "<html lang='en'>";
+    html += "<head>";
+    html += "<meta charset='UTF-8'>";
+    html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+    html += "<title>ESP32 Force Simulation</title>"; // Updated title
+    html += "<style>";
+    html += "body { font-family: 'Inter', sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background-color: #f0f2f5; color: #333; }";
+    html += "h2 { color: #2c3e50; margin-bottom: 20px; }";
+    html += "div { background-color: #fff; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1); text-align: center; margin-bottom: 20px; }"; // Added margin-bottom
+    html += "p { margin: 15px 0; font-size: 1.1em; }";
+    html += "button { background-color: #007bff; color: white; padding: 12px 25px; border: none; border-radius: 8px; cursor: pointer; font-size: 1.1em; margin: 5px; transition: background-color 0.3s ease, transform 0.2s ease; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2); }"; // Default button style
+    html += "button:hover { background-color: #0056b3; transform: translateY(-2px); }";
+    html += "button:active { transform: translateY(0); }";
+    html += "button.reset-wifi { background-color: #f44336; }"; // Style for Wi-Fi reset button
+    html += "button.reset-wifi:hover { background-color: #da190b; }";
+    html += "button.data-reset { background-color: #ffc107; color: #333; }"; // Style for data reset button
+    html += "button.data-reset:hover { background-color: #e0a800; }";
+    html += "a { text-decoration: none; }";
+    html += "pre { background-color: #e9ecef; padding: 15px; border-radius: 8px; text-align: left; white-space: pre-wrap; word-wrap: break-word; max-height: 200px; overflow-y: auto; width: 90%; max-width: 400px; margin: 10px auto; font-size: 0.9em; }"; // Style for force history
+    html += "</style>";
+    html += "</head>";
+    html += "<body>";
+
+    // --- Force Simulation Section ---
+    html += "<div>";
+    html += "<h2>Force Reading Simulation</h2>";
+    html += "<p>";
+    html += "<a href='/test_force'><button>Simulate Force Reading</button></a> "; // Button for force simulation
+    html += "<a href='/reset_force_data'><button class='data-reset'>Reset Force Data</button></a>"; // Button for data reset
+    html += "</p>";
+    html += "<p><strong>Force History:</strong></p>";
+    html += "<pre>" + forceHistory + "</pre>"; // Display force history
+    html += "</div>"; // End of Force Simulation div
+
+    // --- Wi-Fi Control Section (General) ---
+    html += "<div>";
+    html += "<h2>Wi-Fi & Device Control</h2>";
+    html += "<p>";
+    html += "<a href='/reset'><button class='reset-wifi'>Reset Wi-Fi & Reboot</button></a>"; // Wi-Fi reset button
+    html += "</p>";
+    html += "<p>Access this page via: <strong>" + accessUrl + "</strong></p>";
+    html += "</div>"; // End of Wi-Fi control div
+
+    html += "</body>";
+    html += "</html>";
+    server.send(200, "text/html", html); // Send the HTML response
+  });
+
+  // Removed LED specific handlers: server.on("/on", ...) and server.on("/off", ...)
+
+  // Handler for simulating a force reading
+  server.on("/test_force", []() {
+    sendCurrentForce(); // Call the force simulation function
+    server.sendHeader("Location", "/", true); // Redirect back to the main page to show updated history
+    server.send(302, "text/plain", "");
+  });
+
+  // Handler for resetting force data
+  server.on("/reset_force_data", []() {
+    currentIndex = 0; // Reset the index for force simulation
+    forceHistory = ""; // Clear the force history
+    Serial.println("Force data reset.");
+    server.sendHeader("Location", "/", true); // Redirect back to the main page
+    server.send(302, "text/plain", "");
+  });
+
+  // Handler for resetting Wi-Fi credentials and rebooting the ESP32
+  server.on("/reset", []() {
+    server.send(200, "text/html", "<h3>Resetting Wi-Fi credentials and rebooting ESP32...</h3><p>Please wait a few moments.</p>");
+    delay(1000); // Give time for the message to be sent
+    WiFi.disconnect(true, true); // Disconnect from Wi-Fi and clear saved credentials
+    Serial.println("Wi-Fi credentials cleared. Rebooting...");
+    delay(1000); // Give time for serial message
+    ESP.restart(); // Restart the ESP32
+  });
+
+  // Start the web server
+  server.begin();
+  Serial.println("📡 Web server started successfully.");
+  Serial.println("--- Setup Complete ---");
+}
+
+void loop() {
+  // Continuously handle client requests to the web server
+  server.handleClient();
+
+  // --- Physical Reset Button Long Press Detection ---
+  // Check if the button is pressed (LOW, assuming INPUT_PULLUP)
+  if (digitalRead(RESET_BUTTON_PIN) == LOW) {
+    if (!buttonPressed) {
+      // Button just pressed
+      buttonPressed = true;
+      buttonPressTime = millis();
+      Serial.println("Reset button pressed. Hold for 3 seconds for factory reset.");
+    } else if (millis() - buttonPressTime > 3000) {
+      // Button held for 3 seconds
+      Serial.println("Long press detected — Performing Factory Reset...");
+      delay(500); // Give time for serial output
+      WiFiManager wm; // Create a temporary WiFiManager instance for reset
+      wm.resetSettings(); // This clears saved Wi-Fi credentials
+      delay(500); // Give time for settings to clear
+      ESP.restart(); // Restart the ESP32
+    }
+  } else {
+    // Button released
+    buttonPressed = false;
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <WiFiManager.h>
+#include <ESPmDNS.h>
+#include "HX711.h"
+
+// Load cell pins and calibration
+#define DT 3
+#define SCK 2
+HX711 scale;
+float calibration_factor = -475.31;
+
+// Web server setup
+WebServer server(80);
+bool mDNSStarted = false;
+
+// --- Physical Reset Button ---
+#define RESET_BUTTON_PIN 4
+unsigned long buttonPressTime = 0;
+bool buttonPressed = false;
+
+// For storing readings history
+String forceHistory = "";
+
+// Function to send current force data using HX711
+void sendCurrentForce() {
+  if (scale.is_ready()) {
+    float grams = scale.get_units(10);
+    float newtons = grams * 0.00980665;
+
+    forceHistory += String(forceHistory.length() / 20 + 1) + ": " + String(newtons, 3) + " N\n";
+    Serial.println("Measured Force: " + String(newtons, 3) + " N");
+  } else {
+    Serial.println("HX711 not ready.");
+    forceHistory += "HX711 not ready\n";
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\n--- ESP32 Load Cell Setup ---");
+
+  // Load cell setup
+  scale.begin(DT, SCK);
+  scale.set_scale(calibration_factor);
+  scale.tare();
+  Serial.println("Scale ready. Place your weight.");
+
+  // Reset button
+  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(40);
+  bool connectedToRouter = wm.autoConnect("ESP32-Setup", "12345678");
+
+  if (connectedToRouter) {
+    Serial.println("✅ Connected to Wi-Fi!");
+    Serial.print("Local IP: ");
+    Serial.println(WiFi.localIP());
+
+    if (MDNS.begin("esp32")) {
+      Serial.println("🌐 mDNS responder started at http://esp32.local");
+      mDNSStarted = true;
+    } else {
+      Serial.println("❌ mDNS failed");
+    }
+  } else {
+    Serial.println("❌ Wi-Fi failed. Starting fallback AP...");
+    WiFi.softAPdisconnect(true);
+    delay(100);
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("ESP32-DirectConnect", "12345678");
+    Serial.print("AP IP: ");
+    Serial.println(WiFi.softAPIP());
+  }
+
+  // --- Web Server Pages ---
+  server.on("/", []() {
+    String accessUrl = (WiFi.getMode() == WIFI_AP) ? "http://192.168.4.1" :
+                       (mDNSStarted ? "http://esp32.local" : "http://" + WiFi.localIP().toString());
+
+    String html = "<!DOCTYPE html><html><head><title>ESP32 Load Cell</title><style>";
+    html += "body { font-family: sans-serif; background:#f0f2f5; padding:40px; text-align:center; }";
+    html += "button { padding:10px 20px; margin:10px; border:none; border-radius:6px; background:#007bff; color:white; font-size:16px; cursor:pointer; }";
+    html += "button:hover { background:#0056b3; }";
+    html += "pre { background:#eee; padding:10px; border-radius:8px; max-width:400px; margin:20px auto; text-align:left; }";
+    html += "</style></head><body>";
+    html += "<h2>Live Force Readings</h2>";
+    html += "<a href='/read_force'><button>Get Current Force</button></a>";
+    html += "<a href='/reset_force_data'><button style='background:#ffc107;color:#000;'>Reset Data</button></a>";
+    html += "<a href='/reset'><button style='background:#f44336;'>Reset Wi-Fi</button></a>";
+    html += "<pre>" + forceHistory + "</pre>";
+    html += "<p>Access URL: <strong>" + accessUrl + "</strong></p>";
+    html += "</body></html>";
+    server.send(200, "text/html", html);
+  });
+
+  server.on("/read_force", []() {
+    sendCurrentForce();
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+
+  server.on("/reset_force_data", []() {
+    forceHistory = "";
+    Serial.println("Force data reset.");
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+
+  server.on("/reset", []() {
+    server.send(200, "text/html", "<h3>Resetting Wi-Fi and rebooting...</h3>");
+    delay(1000);
+    WiFi.disconnect(true, true);
+    ESP.restart();
+  });
+
+  server.begin();
+  Serial.println("📡 Web server started.");
+}
+
+void loop() {
+  server.handleClient();
+
+  if (digitalRead(RESET_BUTTON_PIN) == LOW) {
+    if (!buttonPressed) {
+      buttonPressed = true;
+      buttonPressTime = millis();
+      Serial.println("Reset button pressed. Hold for 3 seconds...");
+    } else if (millis() - buttonPressTime > 3000) {
+      Serial.println("Long press detected — Performing factory reset...");
+      WiFiManager wm;
+      wm.resetSettings();
+      delay(500);
+      ESP.restart();
+    }
+  } else {
+    buttonPressed = false;
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <WiFiManager.h>
+#include <ESPmDNS.h>
+#include "HX711.h"
+// #include <ESP32Servo.h> // Uncomment if you add servo functionality
+
+// --- Load cell pins and calibration ---
+#define DT 3
+#define SCK 2
+HX711 scale;
+float calibration_factor = -475.31;
+
+// --- Web server setup ---
+WebServer server(80);
+bool mDNSStarted = false;
+
+// --- Physical Reset Button ---
+#define RESET_BUTTON_PIN 4
+unsigned long buttonPressTime = 0;
+bool buttonPressed = false;
+
+// For storing readings history
+String forceHistory = "";
+int readingCounter = 0; // Added: Global counter for force readings
+
+// --- Stepper Motor Pin Definitions ---
+const int STEP_PIN = 19;
+const int DIR_PIN = 18;
+const int ENABLE_PIN = 5; // ENA- on TB6600
+
+// --- Stepper Motion Parameters ---
+const int stepsPerRevolution = 400;           // 400 steps per full rotation (half-step mode)
+float distancePerStep = 9.11 / 400.0;         // ~0.02278 cm per step (based on 2.9 cm wheel)
+
+// // --- Servo Pin Definition (EXAMPLE - Add your servo code) ---
+// #define SERVO_PIN 17 // Example pin for servo
+// // Servo myServo; // Uncomment if you add servo functionality
+// // Define servo angles if using a servo for pressure application
+// // const int SERVO_APPLY_PRESSURE_ANGLE = 90; // Example angle
+// // const int SERVO_RETRACT_ANGLE = 0;         // Example angle
+
+// --- Stepper Control Functions ---
+void moveStepper(float cmToMove) {
+  // Determine direction based on positive/negative cmToMove
+  // Assuming positive cmToMove is "pushing forward" (DIR_PIN LOW)
+  // Assuming negative cmToMove is "pulling back" (DIR_PIN HIGH)
+  int direction = (cmToMove >= 0) ? LOW : HIGH; // LOW for forward, HIGH for backward
+  digitalWrite(DIR_PIN, direction);
+
+  long steps = abs(cmToMove) / distancePerStep;
+  Serial.print("Moving stepper ");
+  Serial.print(cmToMove);
+  Serial.print(" cm (");
+  Serial.print(steps);
+  Serial.println(" steps)");
+
+  // ENABLE motor (inverted logic: HIGH = enabled)
+  digitalWrite(ENABLE_PIN, HIGH);
+  delay(10); // Small delay for enable to settle
+
+  for (long i = 0; i < steps; i++) {
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(500); // Adjust for desired speed
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(500); // Adjust for desired speed
+  }
+
+  // DISABLE motor (inverted logic: LOW = disabled)
+  digitalWrite(ENABLE_PIN, LOW);
+  Serial.println("Stepper motor move complete. Motor disabled.");
+}
+
+// Function to perform the full sequence: move stepper, apply pressure (servo - future), read force
+void moveAndMeasure(float distance) {
+    // 1. Move the stepper motor
+    moveStepper(distance);
+    delay(500); // Small delay after movement for mechanical settling
+
+    // 2. (Future) Move servo to apply pressure - UNCOMMENT AND CONFIGURE WHEN ADDING SERVO
+    // Serial.println("Moving servo to apply pressure...");
+    // myServo.write(SERVO_APPLY_PRESSURE_ANGLE);
+    // delay(1500); // Wait for servo to move and pressure to stabilize before reading
+
+    // 3. Read force from load cell
+    sendCurrentForce();
+
+    // 4. (Future) Retract servo - UNCOMMENT AND CONFIGURE WHEN ADDING SERVO
+    // Serial.println("Retracting servo...");
+    // myServo.write(SERVO_RETRACT_ANGLE);
+    // delay(1000); // Wait for servo to retract
+}
+
+// Function to send current force data using HX711
+void sendCurrentForce() {
+  if (scale.is_ready()) {
+    float grams = scale.get_units(10);
+    float newtons = grams * 0.00980665; // Conversion to Newtons
+
+    readingCounter++; // Solved Issue 1: Increment the counter for each new reading
+    forceHistory += String(readingCounter) + ": " + String(newtons, 3) + " N\n"; // Solved Issue 1: Use the counter here
+    Serial.println("Measured Force: " + String(newtons, 3) + " N");
+  } else {
+    Serial.println("HX711 not ready.");
+    readingCounter++; // Increment even on error to keep numbering consistent
+    forceHistory += String(readingCounter) + ": HX711 not ready\n";
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("\n--- ESP32 Load Cell & Stepper Setup ---");
+
+  // Load cell setup
+  scale.begin(DT, SCK);
+  scale.set_scale(calibration_factor);
+  scale.tare();
+  Serial.println("Scale ready. Place your weight.");
+
+  // Stepper Motor Setup
+  pinMode(STEP_PIN, OUTPUT);
+  pinMode(DIR_PIN, OUTPUT);
+  pinMode(ENABLE_PIN, OUTPUT);
+  digitalWrite(ENABLE_PIN, LOW); // Initially disabled (inverted logic)
+  Serial.println("Stepper Motor Initialized.");
+
+  // // Servo Setup (EXAMPLE - Uncomment and configure when adding servo)
+  // // myServo.attach(SERVO_PIN);
+  // // myServo.write(SERVO_RETRACT_ANGLE); // Ensure servo starts in a safe position
+  // // Serial.println("Servo Motor Initialized.");
+
+  // Reset button
+  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(40);
+  bool connectedToRouter = wm.autoConnect("ESP32-Setup", "12345678");
+
+  if (connectedToRouter) {
+    Serial.println("✅ Connected to Wi-Fi!");
+    Serial.print("Local IP: ");
+    Serial.println(WiFi.localIP());
+
+    if (MDNS.begin("esp32")) {
+      Serial.println("🌐 mDNS responder started at http://esp32.local");
+      mDNSStarted = true;
+    } else {
+      Serial.println("❌ mDNS failed");
+    }
+  } else {
+    Serial.println("❌ Wi-Fi failed. Starting fallback AP...");
+    WiFi.softAPdisconnect(true);
+    delay(100);
+    WiFi.mode(WIFI_AP);
+    WiFi.softAP("ESP32-DirectConnect", "12345678");
+    Serial.print("AP IP: ");
+    Serial.println(WiFi.softAPIP());
+  }
+
+  // --- Web Server Pages ---
+  server.on("/", []() {
+    String accessUrl = (WiFi.getMode() == WIFI_AP) ? "http://192.168.4.1" :
+                        (mDNSStarted ? "http://esp32.local" : "http://" + WiFi.localIP().toString());
+
+    String html = "<!DOCTYPE html><html><head><title>ESP32 Load Cell & Stepper</title><meta name='viewport' content='width=device-width, initial-scale=1'><style>";
+    html += "body { font-family: sans-serif; background:#f0f2f5; padding:20px; text-align:center; color:#333; }"; // Reduced padding
+    html += "h2, h3 { color: #222; margin-bottom: 15px; }";
+    html += "button { padding:12px 25px; margin:8px; border:none; border-radius:6px; background:#007bff; color:white; font-size:16px; cursor:pointer; transition: background 0.3s ease; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }"; // Improved button styles
+    html += "button:hover { background:#0056b3; transform: translateY(-1px); box-shadow: 0 4px 8px rgba(0,0,0,0.2); }"; // Hover effects
+    html += ".action-group { margin: 25px auto; border: 1px solid #ddd; padding: 20px; border-radius: 10px; background: #fff; max-width: 500px; box-shadow: 0 4px 10px rgba(0,0,0,0.05); }"; // Group styling
+    html += ".action-group h3 { margin-top: 0; padding-bottom: 10px; border-bottom: 1px solid #eee; }";
+    html += "pre { background:#e9ecef; padding:15px; border-radius:8px; max-width:600px; margin:20px auto; text-align:left; white-space: pre-wrap; word-wrap: break-word; font-size: 0.9em; line-height: 1.6; color: #444; border: 1px solid #dee2e6; overflow-y: auto; max-height: 250px; }"; // History box improvements
+    html += "p { font-size: 0.9em; color: #555; }";
+    html += "</style></head><body>";
+    html += "<h2>ESP32 Tube Pressure Tester</h2>";
+
+    html += "<div class='action-group'>";
+    html += "<h3>Tube Positioning & Measurement</h3>";
+    html += "<p>Move the tube to a specific distance and automatically measure force.</p>";
+    html += "<a href='/move10cm'><button>Move 10cm</button></a>";
+    html += "<a href='/move40cm'><button>Move 40cm</button></a>";
+    html += "<a href='/move60cm'><button>Move 60cm</button></a>";
+    html += "<a href='/read_force'><button style='background:#28a745;'>Measure Current Force Only</button></a>"; // Added specific button for just force
+    html += "</div>";
+
+    html += "<div class='action-group'>";
+    html += "<h3>Force Data Management</h3>";
+    html += "<a href='/reset_force_data'><button style='background:#ffc107;color:#000;'>Reset All Force Data</button></a>";
+    html += "</div>";
+
+    html += "<div class='action-group'>";
+    html += "<h3>System & Wi-Fi Configuration</h3>";
+    html += "<a href='/reset'><button style='background:#f44336;'>Reset Wi-Fi Settings & Reboot</button></a>";
+    html += "</div>";
+
+    html += "<h3>Force Readings History</h3>";
+    html += "<pre>" + forceHistory + "</pre>";
+    html += "<p>Access URL: <strong>" + accessUrl + "</strong></p>";
+    html += "</body></html>";
+    server.send(200, "text/html", html);
+  });
+
+  // --- New Stepper Motor Endpoints (Solved Issue 2: Direct Redirect) ---
+  server.on("/move10cm", []() {
+    Serial.println("Web request: Initiating 10cm move and measure sequence...");
+    moveAndMeasure(10.0);
+    server.sendHeader("Location", "/", true); // Redirect back to the root page
+    server.send(302, "text/plain", "");      // Send the redirect response
+  });
+
+  server.on("/move40cm", []() {
+    Serial.println("Web request: Initiating 40cm move and measure sequence...");
+    moveAndMeasure(40.0);
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+
+  server.on("/move60cm", []() {
+    Serial.println("Web request: Initiating 60cm move and measure sequence...");
+    moveAndMeasure(60.0);
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+
+  server.on("/read_force", []() {
+    Serial.println("Web request: Measuring current force only...");
+    sendCurrentForce();
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+
+  server.on("/reset_force_data", []() {
+    forceHistory = "";
+    readingCounter = 0; // Solved Issue 1: Reset counter when data is cleared
+    Serial.println("Force data reset.");
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+  });
+
+  server.on("/reset", []() {
+    server.send(200, "text/html", "<h3>Resetting Wi-Fi and rebooting...</h3>");
+    delay(1000);
+    WiFi.disconnect(true, true);
+    ESP.restart();
+  });
+
+  server.begin();
+  Serial.println("📡 Web server started.");
+}
+
+void loop() {
+  server.handleClient();
+
+  // Handle physical reset button
+  if (digitalRead(RESET_BUTTON_PIN) == LOW) {
+    if (!buttonPressed) {
+      buttonPressed = true;
+      buttonPressTime = millis();
+      Serial.println("Reset button pressed. Hold for 3 seconds for factory reset...");
+    } else if (millis() - buttonPressTime > 3000) {
+      Serial.println("Long press detected — Performing factory reset...");
+      WiFiManager wm;
+      wm.resetSettings();
+      delay(500);
+      ESP.restart();
+    }
+  } else {
+    buttonPressed = false;
+  }
+}
