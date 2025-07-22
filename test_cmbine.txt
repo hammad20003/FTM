@@ -1,0 +1,1348 @@
+#include "FS.h"
+#include <WiFi.h>
+#include <vector>
+#include "SPIFFS.h"
+#include <ESPmDNS.h>
+#include <WebServer.h>
+#include <ESP32Servo.h>
+#include <WiFiManager.h>
+#include <ArduinoJson.h>
+#include <WebSocketsServer.h> // New include for WebSockets
+
+ // New include for Servo control
+
+// WiFi network credentials
+const char* ssid = "hadi";
+const char* password = "12345678";
+
+WebServer server(80);
+WebSocketsServer webSocket = WebSocketsServer(81); // WebSocket server on port 81
+
+Servo servo; // Servo object
+const int SERVO_PIN = 13; // Pin for servo control
+
+// Test parameters for simulation
+const float DEGREE_TO_DISPLACEMENT = 0.0216; // cm/degree (simulated)
+const float SPRING_CONSTANT = 150.0;        // simulated stiffness (g/cm^2, or similar unit)
+
+// Session state
+bool isLoggedIn = false;
+bool isAdmin = false;
+
+// Configuration structure
+struct Configuration {
+  String name;
+  String distance;
+  String angle;
+  String speed;
+};
+
+// Stored configurations
+std::vector<Configuration> configurations;
+
+// Currently loaded configuration for process
+String currentConfigName = "No Configuration Loaded";
+String currentDistance = "N/A";
+String currentAngle = "N/A";
+String currentSpeed = "N/A";
+
+// Selected configuration for deletion
+String selectedConfigNameForDelete = "No Configuration Selected";
+String selectedDistanceForDelete = "N/A";
+String selectedAngleForDelete = "N/A";
+String selectedSpeedForDelete = "N/A";
+int selectedConfigIndexForDelete = -1;
+
+// SPIFFS file for configurations
+const char* CONFIG_FILE = "/configs.json";
+
+// Process simulation state
+String processStatus = "Ready"; // Ready, Running, Paused, Stopped, Completed
+unsigned long processStartTime = 0;
+unsigned long processPauseTime = 0;
+unsigned long processDurationSeconds = 0; // Duration based on 'angle' config
+unsigned long remainingTimeSeconds = 0;
+bool supplyIsOn = false;
+float simulatedVoltageReading = 0.0;
+float simulatedCurrentReading = 0.0;
+unsigned long lastRealTimeUpdate = 0; // For updating voltage/current and remaining time
+unsigned long lastStepTime = 0;       // For sending data points to WebSocket
+
+int angle = 0; // Current angle for the simulated test, used for graph data
+
+// Convert all configurations to JSON string
+String serializeAllConfigsToJson(const std::vector<Configuration>& configs) {
+  DynamicJsonDocument doc(1024);
+  JsonArray jsonArray = doc.to<JsonArray>();
+
+  for (const auto& config : configs) {
+    JsonObject obj = jsonArray.add<JsonObject>();
+    obj["name"] = config.name;
+    obj["distance"] = config.distance;
+    obj["angle"] = config.angle;
+    obj["speed"] = config.speed;
+  }
+
+  String jsonString;
+  serializeJson(doc, jsonString);
+  return jsonString;
+}
+
+// Populate configurations from JSON string
+bool deserializeJsonToAllConfigs(const String& jsonString, std::vector<Configuration>& configs) {
+  DynamicJsonDocument doc(1024);
+  DeserializationError error = deserializeJson(doc, jsonString);
+
+  if (error) {
+    Serial.print(F("deserializeJson() failed: "));
+    Serial.println(error.f_str());
+    return false;
+  }
+
+  JsonArray jsonArray = doc.as<JsonArray>();
+  if (jsonArray.isNull()) return false;
+
+  configs.clear();
+  for (JsonObject obj : jsonArray) {
+    Configuration config;
+    config.name = obj["name"].as<String>();
+    config.distance = obj["distance"].as<String>();
+    config.angle = obj["angle"].as<String>();
+    config.speed = obj["speed"].as<String>();
+    configs.push_back(config);
+  }
+  return true;
+}
+
+// Save configurations to SPIFFS
+void saveConfigurationsToSPIFFS() {
+  String json = serializeAllConfigsToJson(configurations);
+  File file = SPIFFS.open(CONFIG_FILE, "w");
+  if (!file) {
+    Serial.println("Failed to open config file for writing");
+    return;
+  }
+  if (file.print(json)) {
+    Serial.println("Configurations saved to SPIFFS.");
+  } else {
+    Serial.println("Failed to write configurations.");
+  }
+  file.close();
+}
+
+// Load configurations from SPIFFS
+void loadConfigurationsFromSPIFFS() {
+  if (!SPIFFS.exists(CONFIG_FILE)) {
+    Serial.println("Config file not found. Starting with empty configs.");
+    return;
+  }
+
+  File file = SPIFFS.open(CONFIG_FILE, "r");
+  if (!file) {
+    Serial.println("Failed to open config file for reading");
+    return;
+  }
+
+  String jsonString = file.readString();
+  file.close();
+
+  if (deserializeJsonToAllConfigs(jsonString, configurations)) {
+    Serial.println("Configurations loaded from SPIFFS.");
+  } else {
+    Serial.println("Failed to parse configurations from SPIFFS.");
+  }
+}
+
+// Display a simple message box
+void showMessageBox(const String& title, const String& message, const String& backLink) {
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>%TITLE%</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f0f4f8; }
+    </style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4">
+    <div class="bg-white rounded-lg shadow-xl p-8 text-center max-w-sm w-full">
+        <h2 class="text-2xl font-bold text-gray-900 mb-4">%TITLE%</h2>
+        <p class="text-gray-700 mb-6">%MESSAGE%</p>
+        <a href="%BACK_LINK%" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-md shadow-md transition duration-300 ease-in-out">
+            Go Back
+        </a>
+    </div>
+</body>
+</html>
+  )rawliteral";
+  html.replace("%TITLE%", title);
+  html.replace("%MESSAGE%", message);
+  html.replace("%BACK_LINK%", backLink);
+  server.send(200, "text/html", html);
+}
+
+// Handle login page display
+void handleLogin() {
+  if (isLoggedIn) {
+    server.sendHeader("Location", "/home");
+    server.send(302, "text/plain", "");
+    return;
+  }
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FTM-01 Login</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style> body { font-family: 'Inter', sans-serif; background-color: #e2e8f0; } </style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4">
+    <div class="bg-white rounded-lg shadow-xl p-8 flex flex-col md:flex-row items-center md:items-start space-y-8 md:space-y-0 md:space-x-12 max-w-4xl w-full">
+        <div class="flex flex-col space-y-6 w-full md:w-1/2">
+            <h2 class="text-2xl font-bold text-gray-800">Login</h2>
+            <form action="/login" method="POST" class="space-y-4">
+                <div>
+                    <label for="username" class="block text-sm font-medium text-gray-700 mb-1">Username *</label>
+                    <input type="text" id="username" name="username" placeholder="Enter Username" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm p-2" required>
+                </div>
+                <div>
+                    <label for="password" class="block text-sm font-medium text-gray-700 mb-1">Password *</label>
+                    <input type="password" id="password" name="password" placeholder="Enter Password" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm p-2" required>
+                </div>
+                <div class="flex justify-end">
+                    <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-md shadow-md transition duration-300 ease-in-out">
+                        LOGIN
+                    </button>
+                </div>
+            </form>
+            <div id="errorMessage" class="text-red-600 text-sm mt-2"></div>
+        </div>
+        <div class="text-gray-700 w-full md:w-1/2">
+            <h2 class="text-3xl font-bold text-gray-900 mb-2">FTM-01</h2>
+            <h3 class="text-xl font-medium text-blue-700 mb-4">Flexural testing Machine</h3>
+            <p class="text-base leading-relaxed">
+            Flexural Testing Machine is designed to evaluate the bending
+            strength and flexibility of catheter tubes. This system ensures
+            precise measurement of mechanical performance, critical for
+            maintaining quality and reliability in medical-grade applications.
+            </p>
+            <p class="text-sm text-gray-500 mt-4"> Copyright © Revive Medical Technologies Inc. </p>
+        </div>
+    </div>
+    <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.has('error') && urlParams.get('error') === '1') {
+            document.getElementById('errorMessage').textContent = 'Invalid username or password.';
+        }
+    </script>
+</body>
+</html>
+  )rawliteral";
+  server.send(200, "text/html", html);
+}
+
+// Handle login form submission
+void handleLoginPost() {
+  String username = server.arg("username");
+  String password = server.arg("password");
+
+  if (username == "admin" && password == "admin") {
+    isLoggedIn = true;
+    isAdmin = true;
+    server.sendHeader("Location", "/home");
+    server.send(302, "text/plain", "");
+  } else if (username == "user" && password == "user") {
+    isLoggedIn = true;
+    isAdmin = false;
+    server.sendHeader("Location", "/home");
+    server.send(302, "text/plain", "");
+  } else {
+    server.sendHeader("Location", "/?error=1");
+    server.send(302, "text/plain", "");
+  }
+}
+
+// Handle logout
+void handleLogout() {
+  isLoggedIn = false;
+  isAdmin = false;
+  server.sendHeader("Location", "/");
+  server.send(302, "text/plain", "");
+}
+
+// Route to home page based on user role
+void handleHomeRouter() {
+  if (!isLoggedIn) {
+    server.sendHeader("Location", "/");
+    server.send(302, "text/plain", "");
+    return;
+  }
+
+  String html;
+  if (isAdmin) {
+    html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FTM-01 Main Menu (Admin)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style> body { font-family: 'Inter', sans-serif; background-color: #f0f4f8; } </style>
+</head>
+<body class="min-h-screen flex flex-col">
+    <header class="w-full bg-white shadow-sm p-4">
+        <nav class="container mx-auto flex items-center justify-between">
+            <h1 class="text-xl font-semibold text-gray-800">Main Menu (Admin)</h1>
+            <a href="/logout" class="bg-gray-200 hover:bg-gray-300 text-gray-700 font-semibold py-2 px-4 rounded-lg shadow-md transition duration-300 ease-in-out text-center text-sm">Logout</a>
+        </nav>
+    </header>
+    <main class="flex-grow flex items-center justify-center p-4">
+        <div class="bg-white rounded-lg shadow-xl p-8 flex flex-col md:flex-row items-center md:items-start space-y-8 md:space-y-0 md:space-x-12 max-w-4xl w-full">
+            <div class="flex flex-col space-y-4 w-full md:w-auto">
+                <a href="/page1" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out text-center"> Load Configuration </a>
+                <a href="/page2" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out text-center"> Create Configuration </a>
+                <a href="/service-mode" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out text-center"> Service Mode </a>
+                <a href="/delete-config-page" class="bg-red-600 hover:bg-red-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out text-center"> Delete Configuration </a>
+            </div>
+            <div class="text-gray-700 w-full md:w-2/3">
+                <h2 class="text-3xl font-bold text-gray-900 mb-2">FTM-01</h2>
+                <h3 class="text-xl font-medium text-blue-700 mb-4">Flexural testing Machine</h3>
+                <p class="text-base leading-relaxed"> Flexural Testing Machine is designed to evaluate the bending strength and flexibility of catheter tubes. This system ensures precise measurement of mechanical performance, critical for maintaining quality and reliability in medical-grade applications. </p>
+                <p class="text-sm text-gray-500 mt-4"> Copyright © Revive Medical Technologies Inc. </p>
+            </div>
+        </div>
+    </main>
+</body>
+</html>
+    )rawliteral";
+  } else {
+    html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FTM-01 Main Menu (User)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style> body { font-family: 'Inter', sans-serif; background-color: #f0f4f8; } </style>
+</head>
+<body class="min-h-screen flex flex-col">
+    <header class="w-full bg-white shadow-sm p-4">
+        <nav class="container mx-auto flex items-center justify-between">
+            <h1 class="text-xl font-semibold text-gray-800">Main Menu (User)</h1>
+            <a href="/logout" class="bg-gray-200 hover:bg-gray-300 text-gray-700 font-semibold py-2 px-4 rounded-lg shadow-md transition duration-300 ease-in-out text-center text-sm">Logout</a>
+        </nav>
+    </header>
+    <main class="flex-grow flex items-center justify-center p-4">
+        <div class="bg-white rounded-lg shadow-xl p-8 flex flex-col md:flex-row items-center md:items-start space-y-8 md:space-y-0 md:space-x-12 max-w-4xl w-full">
+            <div class="flex flex-col space-y-4 w-full md:w-auto">
+                <a href="/page1" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out text-center"> Load Configuration </a>
+                <a href="/service-mode" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-lg shadow-md transition duration-300 ease-in-out text-center"> Service Mode </a>
+            </div>
+            <div class="text-gray-700 w-full md:w-2/3">
+                <h2 class="text-3xl font-bold text-gray-900 mb-2">FTM-01</h2>
+                <h3 class="text-xl font-medium text-blue-700 mb-4">Flexural testing Machine</h3>
+                <p class="text-base leading-relaxed"> Flexural Testing Machine is designed to evaluate the bending strength and flexibility of catheter tubes. This system ensures precise measurement of mechanical performance, critical for maintaining quality and reliability in medical-grade applications. </p>
+                <p class="text-sm text-gray-500 mt-4"> Copyright © Revive Medical Technologies Inc. </p>
+            </div>
+        </div>
+    </main>
+</body>
+</html>
+    )rawliteral";
+  }
+  server.send(200, "text/html", html);
+}
+
+// Handle Load Configuration page
+void handlePage1() {
+  if (!isLoggedIn) {
+    server.sendHeader("Location", "/");
+    server.send(302, "text/plain", "");
+    return;
+  }
+
+  String configListHtml = "";
+  if (configurations.empty()) {
+    configListHtml = "<p class=\"text-gray-600\">No saved configurations found.</p>";
+  } else {
+    configListHtml += "<ul class=\"list-disc pl-5 space-y-2\">";
+    for (size_t i = 0; i < configurations.size(); ++i) {
+      configListHtml += "<li class=\"flex justify-between items-center bg-gray-50 p-2 rounded-md shadow-sm\">";
+      configListHtml += "<span class=\"text-gray-800 font-medium\">" + configurations[i].name + "</span>";
+      configListHtml += "<a href=\"/load-selected-config?index=" + String(i) + "\" class=\"bg-blue-500 hover:bg-blue-600 text-white text-sm font-semibold py-1 px-3 rounded-md transition duration-300 ease-in-out\">Load</a>";
+      configListHtml += "</li>";
+    }
+    configListHtml += "</ul>";
+  }
+
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Load Configuration</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style> body { font-family: 'Inter', sans-serif; background-color: #f0f4f8; } </style>
+</head>
+<body class="min-h-screen flex flex-col">
+    <header class="w-full bg-white shadow-sm p-4">
+        <nav class="container mx-auto flex items-center justify-between">
+            <div class="flex items-center space-x-4">
+                <a href="/home" class="text-gray-600 hover:text-gray-900">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-6 h-6"> <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" /> </svg>
+                </a>
+                <h1 class="text-xl font-semibold text-gray-800">Load Configuration</h1>
+            </div>
+            <a href="/home" class="text-gray-600 hover:text-red-600">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-6 h-6"> <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /> </svg>
+            </a>
+        </nav>
+    </header>
+    <main class="flex-grow flex items-center justify-center p-4">
+        <div class="bg-white rounded-lg shadow-xl p-8 flex flex-col md:flex-row items-start space-y-8 md:space-y-0 md:space-x-12 max-w-4xl w-full">
+            <div class="flex-1 w-full md:w-1/2 space-y-4">
+                <h2 class="text-xl font-semibold text-gray-800 mb-2">Saved Configurations</h2>
+                %CONFIG_LIST_HTML%
+            </div>
+            <div class="flex-1 w-full md:w-1/2 space-y-6">
+                <h2 class="text-xl font-semibold text-gray-800 mb-2">Currently Loaded Configuration Details</h2>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Configuration Name</label>
+                    <p class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%CURRENT_CONFIG_NAME%</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Distance (cm)</label>
+                    <p class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%CURRENT_DISTANCE%</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Angle</label>
+                    <p class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%CURRENT_ANGLE%</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Speed</label>
+                    <p class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%CURRENT_SPEED%</p>
+                </div>
+                <div class="flex justify-end mt-6">
+                    <a href="/process" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-md shadow-md transition duration-300 ease-in-out"> Process </a>
+                </div>
+            </div>
+        </div>
+    </main>
+</body>
+</html>
+  )rawliteral";
+  html.replace("%CONFIG_LIST_HTML%", configListHtml);
+  html.replace("%CURRENT_CONFIG_NAME%", currentConfigName);
+  html.replace("%CURRENT_DISTANCE%", currentDistance + (currentDistance == "N/A" ? "" : "cm"));
+  html.replace("%CURRENT_ANGLE%", currentAngle);
+  html.replace("%CURRENT_SPEED%", currentSpeed);
+  server.send(200, "text/html", html);
+}
+
+// Handle Create Configuration page
+void handlePage2() {
+  if (!isLoggedIn) {
+    server.sendHeader("Location", "/");
+    server.send(302, "text/plain", "");
+    return;
+  }
+  if (!isAdmin) {
+    server.sendHeader("Location", "/home");
+    server.send(302, "text/plain", "");
+    return;
+  }
+
+  if (server.method() == HTTP_POST) {
+    if (configurations.size() >= 5) {
+      showMessageBox("Error", "Max 5 configurations allowed. Delete existing.", "/page2");
+      return;
+    }
+
+    Configuration newConfig;
+    if (server.hasArg("configName")) newConfig.name = server.arg("configName");
+    if (server.hasArg("distance")) newConfig.distance = server.arg("distance");
+    if (server.hasArg("angle")) newConfig.angle = server.arg("angle");
+    if (server.hasArg("speed")) newConfig.speed = server.arg("speed");
+
+    bool nameExists = false;
+    for (const auto& config : configurations) {
+      if (config.name == newConfig.name && !newConfig.name.isEmpty()) {
+        nameExists = true;
+        break;
+      }
+    }
+
+    if (nameExists) {
+      showMessageBox("Error", "Configuration name exists. Choose different.", "/page2");
+      return;
+    }
+
+    configurations.push_back(newConfig);
+    saveConfigurationsToSPIFFS();
+  }
+
+  String configListHtml = "";
+  if (configurations.empty()) {
+    configListHtml = "<p class=\"text-gray-600\">No configurations created yet.</p>";
+  } else {
+    configListHtml += "<ul class=\"list-disc pl-5 space-y-2\">";
+    for (size_t i = 0; i < configurations.size(); ++i) {
+      configListHtml += "<li class=\"flex justify-between items-center bg-gray-50 p-2 rounded-md shadow-sm\">";
+      configListHtml += "<span class=\"text-gray-800 font-medium\">" + configurations[i].name + "</span>";
+      configListHtml += "</li>";
+    }
+    configListHtml += "</ul>";
+  }
+
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Create Configuration</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style> body { font-family: 'Inter', sans-serif; background-color: #f0f4f8; } </style>
+</head>
+<body class="min-h-screen flex flex-col">
+    <header class="w-full bg-white shadow-sm p-4">
+        <nav class="container mx-auto flex items-center justify-between">
+            <div class="flex items-center space-x-4">
+                <a href="/home" class="text-gray-600 hover:text-gray-900">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-6 h-6"> <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" /> </svg>
+                </a>
+                <h1 class="text-xl font-semibold text-gray-800">Create Configuration</h1>
+            </div>
+            <a href="/home" class="text-gray-600 hover:text-red-600">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-6 h-6"> <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /> </svg>
+            </a>
+        </nav>
+    </header>
+    <main class="flex-grow flex items-center justify-center p-4">
+        <div class="bg-white rounded-lg shadow-xl p-8 flex flex-col md:flex-row items-start space-y-8 md:space-y-0 md:space-x-12 max-w-4xl w-full">
+            <div class="flex-1 w-full md:w-1/2 space-y-6">
+                <h2 class="text-xl font-semibold text-gray-800 mb-2">Create New Configuration</h2>
+                <form action="/page2" method="POST" class="space-y-6">
+                    <div>
+                        <label for="configName" class="block text-sm font-medium text-gray-700 mb-1">Configuration Name</label>
+                        <input type="text" id="configName" name="configName" placeholder="Enter Configuration Name" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500 sm:text-sm p-2" required>
+                    </div>
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                            <label for="distance" class="block text-sm font-medium text-gray-700 mb-1">Distance (cm)</label>
+                            <select id="distance" name="distance" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md shadow-sm">
+                                <script> for (let i = 10; i <= 90; i += 10) { document.write(`<option value="${i}">${i}cm</option>`); } </script>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="angle" class="block text-sm font-medium text-gray-700 mb-1">Angle</label>
+                            <select id="angle" name="angle" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md shadow-sm">
+                                <script> for (let i = 2; i <= 30; i += 2) { document.write(`<option value="${i}">${i}</option>`); } </script>
+                            </select>
+                        </div>
+                        <div>
+                            <label for="speed" class="block text-sm font-medium text-gray-700 mb-1">Speed</label>
+                            <select id="speed" name="speed" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md shadow-sm">
+                                <option value="1x">1x</option> <option value="1.5x">1.5x</option> <option value="2x">2x</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="flex justify-end mt-6">
+                        <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-6 rounded-md shadow-md transition duration-300 ease-in-out"> Create </button>
+                    </div>
+                </form>
+            </div>
+            <div class="flex-1 w-full md:w-1/2 space-y-4">
+                <h2 class="text-xl font-semibold text-gray-800 mb-2">Created Configurations</h2>
+                %CONFIG_LIST_HTML%
+            </div>
+        </div>
+    </main>
+</body>
+</html>
+  )rawliteral";
+  html.replace("%CONFIG_LIST_HTML%", configListHtml);
+  server.send(200, "text/html", html);
+}
+
+// Load selected configuration into global variables
+void handleLoadSelectedConfig() {
+  if (!isLoggedIn) {
+    server.sendHeader("Location", "/");
+    server.send(302, "text/plain", "");
+    return;
+  }
+
+  if (server.hasArg("index")) {
+    int index = server.arg("index").toInt();
+    if (index >= 0 && index < configurations.size()) {
+      currentConfigName = configurations[index].name;
+      currentDistance = configurations[index].distance;
+      currentAngle = configurations[index].angle;
+      currentSpeed = configurations[index].speed;
+      processDurationSeconds = currentAngle.toInt(); // Angle maps to process duration
+      remainingTimeSeconds = processDurationSeconds;
+      processStatus = "Ready";
+      supplyIsOn = false;
+      simulatedVoltageReading = 0.0;
+      simulatedCurrentReading = 0.0;
+    }
+  }
+  handlePage1();
+}
+
+// Handle Delete Configuration page
+void handleDeleteConfigPage() {
+  if (!isLoggedIn) {
+    server.sendHeader("Location", "/");
+    server.send(302, "text/plain", "");
+    return;
+  }
+  if (!isAdmin) {
+    server.sendHeader("Location", "/home");
+    server.send(302, "text/plain", "");
+    return;
+  }
+
+  String configListHtml = "";
+  if (configurations.empty()) {
+    configListHtml = "<p class=\"text-gray-600\">No configurations to delete.</p>";
+  } else {
+    configListHtml += "<ul class=\"list-none p-0 m-0 space-y-2\">";
+    for (size_t i = 0; i < configurations.size(); ++i) {
+      configListHtml += "<li id=\"config-" + String(i) + "\" class=\"cursor-pointer bg-gray-50 hover:bg-gray-100 p-3 rounded-md shadow-sm transition duration-150 ease-in-out\" onclick=\"selectConfig(" + String(i) + ")\">";
+      configListHtml += "<span class=\"text-gray-800 font-medium\">" + configurations[i].name + "</span>";
+      configListHtml += "</li>";
+    }
+    configListHtml += "</ul>";
+  }
+
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Delete Configuration</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f0f4f8; }
+        .selected-config { background-color: #bfdbfe !important; border: 1px solid #60a5fa; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col">
+    <header class="w-full bg-white shadow-sm p-4">
+        <nav class="container mx-auto flex items-center justify-between">
+            <div class="flex items-center space-x-4">
+                <a href="/home" class="text-gray-600 hover:text-gray-900">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-6 h-6"> <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" /> </svg>
+                </a>
+                <h1 class="text-xl font-semibold text-gray-800">Delete Configuration</h1>
+            </div>
+            <a href="/home" class="text-gray-600 hover:text-red-600">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-6 h-6"> <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /> </svg>
+            </a>
+        </nav>
+    </header>
+    <main class="flex-grow flex items-center justify-center p-4">
+        <div class="bg-white rounded-lg shadow-xl p-8 flex flex-col md:flex-row items-start space-y-8 md:space-y-0 md:space-x-12 max-w-4xl w-full">
+            <div class="flex-1 w-full md:w-1/2 space-y-4">
+                <h2 class="text-xl font-semibold text-gray-800 mb-2">Saved Configurations</h2>
+                %CONFIG_LIST_HTML%
+                <div class="flex justify-end mt-6">
+                    <button id="deleteButton" onclick="confirmDelete()" class="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-6 rounded-md shadow-md transition duration-300 ease-in-out opacity-50 cursor-not-allowed" disabled> Delete Selected Configuration </button>
+                </div>
+            </div>
+            <div class="flex-1 w-full md:w-1/2 space-y-6">
+                <h2 class="text-xl font-semibold text-gray-800 mb-2">Selected Configuration Details</h2>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Configuration Name</label>
+                    <p id="displayConfigName" class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%SELECTED_CONFIG_NAME_FOR_DELETE%</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Distance (cm)</label>
+                    <p id="displayDistance" class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%SELECTED_DISTANCE_FOR_DELETE%</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Angle</label>
+                    <p id="displayAngle" class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%SELECTED_ANGLE_FOR_DELETE%</p>
+                </div>
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">Speed</label>
+                    <p id="displaySpeed" class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%SELECTED_SPEED_FOR_DELETE%</p>
+                </div>
+            </div>
+        </div>
+    </main>
+    <script>
+        let selectedIndex = -1;
+        const configurationsData = %CONFIGURATIONS_JSON%; // This will be replaced by C++
+
+        function selectConfig(index) {
+            // Remove 'selected-config' from previously selected item
+            if (selectedIndex !== -1 && document.getElementById('config-' + selectedIndex)) {
+                document.getElementById('config-' + selectedIndex).classList.remove('selected-config');
+            }
+
+            // Add 'selected-config' to the new selected item
+            const selectedElement = document.getElementById('config-' + index);
+            if (selectedElement) {
+                selectedElement.classList.add('selected-config');
+                selectedIndex = index;
+                document.getElementById('deleteButton').disabled = false;
+                document.getElementById('deleteButton').classList.remove('opacity-50', 'cursor-not-allowed');
+
+                // Update displayed details
+                const config = configurationsData[index];
+                document.getElementById('displayConfigName').textContent = config.name;
+                document.getElementById('displayDistance').textContent = config.distance + 'cm';
+                document.getElementById('displayAngle').textContent = config.angle;
+                document.getElementById('displaySpeed').textContent = config.speed;
+            }
+        }
+
+        function confirmDelete() {
+            if (selectedIndex !== -1) {
+                // Instead of confirm(), use a custom modal or direct action
+                // For this example, we'll directly navigate to the delete URL
+                // In a real application, you'd show a custom confirmation dialog
+                window.location.href = "/confirm-delete-config?index=" + selectedIndex;
+            }
+        }
+
+        // Initialize display with "No Configuration Selected" if no config is selected
+        document.addEventListener('DOMContentLoaded', () => {
+             if (selectedIndex === -1) {
+                document.getElementById('displayConfigName').textContent = "No Configuration Selected";
+                document.getElementById('displayDistance').textContent = "N/A";
+                document.getElementById('displayAngle').textContent = "N/A";
+                document.getElementById('displaySpeed').textContent = "N/A";
+            }
+        });
+    </script>
+</body>
+</html>
+  )rawliteral";
+  // Replace placeholders for delete page
+  html.replace("%CONFIG_LIST_HTML%", configListHtml);
+  html.replace("%SELECTED_CONFIG_NAME_FOR_DELETE%", selectedConfigNameForDelete);
+  html.replace("%SELECTED_DISTANCE_FOR_DELETE%", selectedDistanceForDelete + (selectedDistanceForDelete == "N/A" ? "" : "cm"));
+  html.replace("%SELECTED_ANGLE_FOR_DELETE%", selectedAngleForDelete);
+  html.replace("%SELECTED_SPEED_FOR_DELETE%", selectedSpeedForDelete);
+  html.replace("%CONFIGURATIONS_JSON%", serializeAllConfigsToJson(configurations)); // Pass all configs as JSON for JS to use
+  server.send(200, "text/html", html);
+}
+
+// Handle deletion of selected configuration
+void handleDeleteSelectedConfig() {
+  if (!isLoggedIn || !isAdmin) {
+    server.sendHeader("Location", "/");
+    server.send(302, "text/plain", "");
+    return;
+  }
+
+  if (server.hasArg("index")) {
+    int index = server.arg("index").toInt();
+    if (index >= 0 && index < configurations.size()) {
+      selectedConfigNameForDelete = configurations[index].name;
+      selectedDistanceForDelete = configurations[index].distance;
+      selectedAngleForDelete = configurations[index].angle;
+      selectedSpeedForDelete = configurations[index].speed;
+      selectedConfigIndexForDelete = index; // Store index for actual deletion
+      server.sendHeader("Location", "/confirm-delete-config"); // Redirect to confirmation
+      server.send(302, "text/plain", "");
+      return;
+    }
+  }
+  showMessageBox("Error", "Invalid configuration selected.", "/delete-config-page");
+}
+
+// Handle confirmation of deletion
+void handleConfirmDeleteConfig() {
+  if (!isLoggedIn || !isAdmin) {
+    server.sendHeader("Location", "/");
+    server.send(302, "text/plain", "");
+    return;
+  }
+
+  if (server.method() == HTTP_POST && server.hasArg("confirm") && server.arg("confirm") == "yes") {
+    if (selectedConfigIndexForDelete != -1 && selectedConfigIndexForDelete < configurations.size()) {
+      // Remove the configuration
+      configurations.erase(configurations.begin() + selectedConfigIndexForDelete);
+      saveConfigurationsToSPIFFS(); // Save changes
+      // Reset selected config details
+      selectedConfigNameForDelete = "No Configuration Selected";
+      selectedDistanceForDelete = "N/A";
+      selectedAngleForDelete = "N/A";
+      selectedSpeedForDelete = "N/A";
+      selectedConfigIndexForDelete = -1;
+      showMessageBox("Success", "Configuration deleted successfully.", "/delete-config-page");
+      return;
+    } else {
+      showMessageBox("Error", "No configuration selected for deletion.", "/delete-config-page");
+      return;
+    }
+  }
+
+  // Display confirmation page
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Confirm Deletion</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style> body { font-family: 'Inter', sans-serif; background-color: #f0f4f8; } </style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4">
+    <div class="bg-white rounded-lg shadow-xl p-8 text-center max-w-sm w-full">
+        <h2 class="text-2xl font-bold text-gray-900 mb-4">Confirm Deletion</h2>
+        <p class="text-gray-700 mb-6">Are you sure you want to delete configuration: <br><span class="font-semibold">%CONFIG_NAME%</span>?</p>
+        <form action="/confirm-delete-config" method="POST" class="space-y-4">
+            <input type="hidden" name="confirm" value="yes">
+            <div class="flex justify-center space-x-4">
+                <button type="submit" class="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded-md shadow-md transition duration-300 ease-in-out">
+                    Yes, Delete
+                </button>
+                <a href="/delete-config-page" class="bg-gray-300 hover:bg-gray-400 text-gray-800 font-semibold py-2 px-4 rounded-md shadow-md transition duration-300 ease-in-out">
+                    Cancel
+                </a>
+            </div>
+        </form>
+    </div>
+</body>
+</html>
+  )rawliteral";
+  html.replace("%CONFIG_NAME%", selectedConfigNameForDelete);
+  server.send(200, "text/html", html);
+}
+
+// This function handles the /process route and displays the process page
+void handleProcessPage() {
+  // Ensure the user is logged in before accessing this page
+  if (!isLoggedIn) {
+    server.sendHeader("Location", "/");
+    server.send(302, "text/plain", "");
+    return;
+  }
+
+  // HTML for the Process Mode page, including the graph visualization area
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FTM-01 Process Mode</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f0f4f8; }
+        /* Custom styling for the section boxes */
+        .section-box {
+            min-height: 250px; /* Ensure boxes have some height */
+            border-radius: 0.5rem; /* Rounded corners */
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06); /* Subtle shadow */
+        }
+    </style>
+    <!-- Chart.js library for graph visualization -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body class="min-h-screen flex flex-col">
+    <header class="w-full bg-white shadow-sm p-4">
+        <nav class="container mx-auto flex items-center justify-between">
+            <div class="flex items-center space-x-4">
+                <a href="/page1" class="text-gray-600 hover:text-gray-900">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-6 h-6"> <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" /> </svg>
+                </a>
+                <h1 class="text-xl font-semibold text-gray-800">Process Mode</h1>
+            </div>
+            <a href="/home" class="text-gray-600 hover:text-red-600">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-6 h-6"> <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /> </svg>
+            </a>
+        </nav>
+    </header>
+
+    <main class="flex-grow flex items-center justify-center p-4">
+        <div class="bg-white rounded-lg shadow-xl p-8 flex flex-col lg:flex-row items-start space-y-8 lg:space-y-0 lg:space-x-8 max-w-6xl w-full">
+
+            <!-- User-Defined Values Section -->
+            <div class="section-box flex-1 p-6 bg-gray-50 border border-gray-200">
+                <h2 class="text-lg font-semibold text-gray-800 mb-4">User-Defined Values</h2>
+                <div class="space-y-3">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Name</label>
+                        <p class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%CURRENT_CONFIG_NAME%</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Distance</label>
+                        <p class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%CURRENT_DISTANCE%cm</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Angle</label>
+                        <p class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%CURRENT_ANGLE%</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Speed</label>
+                        <p class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%CURRENT_SPEED%</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Graph/Visual Area Section (Updated) -->
+            <div class="section-box flex-1 flex items-center justify-center bg-gray-50 border border-gray-200 p-4">
+                <canvas id="flexuralChart" class="w-full h-full"></canvas>
+            </div>
+
+            <!-- Real-Time Values Section -->
+            <div class="section-box flex-1 p-6 bg-gray-50 border border-gray-200">
+                <h2 class="text-lg font-semibold text-gray-800 mb-4">Real-Time Values</h2>
+                <div class="space-y-3">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Status</label>
+                        <p id="processStatus" class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%PROCESS_STATUS%</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Remaining Time</label>
+                        <p id="remainingTime" class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800 text-2xl font-bold text-blue-600 text-center">
+                            %REMAINING_TIME_MM_SS%
+                        </p>
+                        <p class="text-xs text-gray-500 text-center">MM : SS</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Simulated Voltage</label>
+                        <p id="simulatedVoltage" class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%SIMULATED_VOLTAGE% V</p>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700">Simulated Current</label>
+                        <p id="simulatedCurrent" class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%SIMULATED_CURRENT% A</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Control Buttons -->
+    <div class="flex justify-center p-4 space-x-4 bg-white shadow-sm mt-4 rounded-lg max-w-lg mx-auto mb-4">
+        <button id="startButton" class="bg-green-600 hover:bg-green-700 text-white font-semibold py-3 px-8 rounded-md shadow-md transition duration-300 ease-in-out">START</button>
+        <button id="pauseButton" class="bg-orange-500 hover:bg-orange-600 text-white font-semibold py-3 px-8 rounded-md shadow-md transition duration-300 ease-in-out">PAUSE</button>
+        <button id="stopButton" class="bg-red-600 hover:bg-red-700 text-white font-semibold py-3 px-8 rounded-md shadow-md transition duration-300 ease-in-out">STOP</button>
+    </div>
+
+    <script>
+        // JavaScript for the Chart and WebSocket communication
+        const ctx = document.getElementById('flexuralChart').getContext('2d');
+        const chartData = {
+            labels: [], // Displacement values will go here
+            datasets: [{
+                label: 'Force (g)',
+                data: [], // Force values will go here
+                borderColor: 'rgb(255, 165, 0)', // Orange color
+                tension: 0.1,
+                fill: false,
+                pointRadius: 2 // Smaller points for cleaner look
+            }]
+        };
+
+        const chartConfig = {
+            type: 'line',
+            data: chartData,
+            options: {
+                animation: false, // Disable animation for real-time updates
+                responsive: true,
+                maintainAspectRatio: false, // Allow canvas to resize freely
+                scales: {
+                    x: {
+                        title: {
+                            display: true,
+                            text: 'Displacement (cm)',
+                            color: '#4A5568' // Gray-700
+                        },
+                        ticks: {
+                            color: '#4A5568'
+                        },
+                        grid: {
+                            color: '#E2E8F0' // Gray-200
+                        }
+                    },
+                    y: {
+                        title: {
+                            display: true,
+                            text: 'Force (g)',
+                            color: '#4A5568'
+                        },
+                        ticks: {
+                            color: '#4A5568'
+                        },
+                        grid: {
+                            color: '#E2E8F0'
+                        }
+                    }
+                },
+                plugins: {
+                    legend: {
+                        labels: {
+                            color: '#4A5568'
+                        }
+                    }
+                }
+            }
+        };
+
+        const flexuralChart = new Chart(ctx, chartConfig);
+
+        // WebSocket connection for real-time data
+        let ws;
+        function connectWebSocket() {
+            ws = new WebSocket("ws://" + location.hostname + ":81/");
+
+            ws.onopen = () => {
+                console.log('WebSocket connected');
+            };
+
+            ws.onmessage = (event) => {
+                const [disp, force] = event.data.split(",");
+                const displacement = parseFloat(disp);
+                const forceValue = parseFloat(force);
+
+                // Add new data point
+                chartData.labels.push(displacement.toFixed(2)); // Display displacement on X-axis
+                chartData.datasets[0].data.push(forceValue);
+
+                // Keep only the last N data points to prevent performance issues with too much data
+                const maxDataPoints = 50; // Adjust as needed
+                if (chartData.labels.length > maxDataPoints) {
+                    chartData.labels.shift();
+                    chartData.datasets[0].data.shift();
+                }
+
+                flexuralChart.update(); // Update the chart
+            };
+
+            ws.onclose = () => {
+                console.log('WebSocket disconnected. Attempting to reconnect...');
+                setTimeout(connectWebSocket, 3000); // Attempt to reconnect after 3 seconds
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                ws.close(); // Close to trigger reconnect
+            };
+        }
+
+        connectWebSocket(); // Initiate WebSocket connection on page load
+
+        // --- Real-time value updates (from original code's intention) ---
+        function updateRealTimeValues() {
+            fetch('/get-process-status')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('processStatus').textContent = data.processStatus;
+                    document.getElementById('remainingTime').textContent = data.remainingTime;
+                    document.getElementById('simulatedVoltage').textContent = data.simulatedVoltageReading.toFixed(2) + ' V';
+                    document.getElementById('simulatedCurrent').textContent = data.simulatedCurrentReading.toFixed(2) + ' A';
+                })
+                .catch(error => console.error('Error fetching process status:', error));
+        }
+
+        // Update real-time values every second (adjust interval as needed)
+        setInterval(updateRealTimeValues, 1000);
+
+        // --- Button Handlers (from original code's intention) ---
+        document.getElementById('startButton').addEventListener('click', () => {
+            fetch('/start-process')
+                .then(response => response.text())
+                .then(message => console.log(message))
+                .catch(error => console.error('Error starting process:', error));
+        });
+
+        document.getElementById('pauseButton').addEventListener('click', () => {
+            fetch('/pause-process')
+                .then(response => response.text())
+                .then(message => console.log(message))
+                .catch(error => console.error('Error pausing process:', error));
+        });
+
+        document.getElementById('stopButton').addEventListener('click', () => {
+            fetch('/stop-process')
+                .then(response => response.text())
+                .then(message => console.log(message))
+                .catch(error => console.error('Error stopping process:', error));
+        });
+
+    </script>
+</body>
+</html>
+)rawliteral";
+
+  // Replace placeholders with current configuration and process data
+  html.replace("%CURRENT_CONFIG_NAME%", currentConfigName);
+  html.replace("%CURRENT_DISTANCE%", currentDistance);
+  html.replace("%CURRENT_ANGLE%", currentAngle);
+  html.replace("%CURRENT_SPEED%", currentSpeed);
+
+  // Format remaining time
+  int minutes = remainingTimeSeconds / 60;
+  int seconds = remainingTimeSeconds % 60;
+  char timeBuffer[6]; // MM:SS\0
+  sprintf(timeBuffer, "%02d:%02d", minutes, seconds);
+  html.replace("%REMAINING_TIME_MM_SS%", String(timeBuffer));
+
+  html.replace("%PROCESS_STATUS%", processStatus);
+  html.replace("%SIMULATED_VOLTAGE%", String(simulatedVoltageReading, 2));
+  html.replace("%SIMULATED_CURRENT%", String(simulatedCurrentReading, 2));
+
+  server.send(200, "text/html", html);
+}
+
+
+// WebSocket event handler
+void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
+  switch (type) {
+    case WStype_DISCONNECTED:
+      Serial.printf("[%u] Disconnected!\n", num);
+      break;
+    case WStype_CONNECTED:
+      {
+        IPAddress ip = webSocket.remoteIP(num);
+        Serial.printf("[%u] Connected from %d.%d.%d.%d url: %s\n", num, ip[0], ip[1], ip[2], ip[3], payload);
+      }
+      break;
+    case WStype_TEXT:
+      Serial.printf("[%u] get Text: %s\n", num, payload);
+      // If the client sends "RESET_CHART", clear server-side angle for a fresh start
+      if (String((char*)payload) == "RESET_CHART") {
+          angle = 0; // Reset angle for a new test run
+          // testRunning = true; // This is now controlled by /start-process
+          Serial.println("Chart reset requested by client.");
+      }
+      break;
+    default:
+      break;
+  }
+}
+
+
+#define RESET_BUTTON_PIN 4
+
+bool mDNSStarted = false;
+bool buttonPressed = false;
+unsigned long buttonPressTime = 0;
+
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+
+  // === WiFi Setup with WiFiManager ===
+  WiFiManager wm;
+  wm.setConfigPortalTimeout(40); // Optional: auto-close config portal
+  bool connectedToRouter = wm.autoConnect("ESP32-Setup", "12345678");
+
+  if (connectedToRouter) {
+    Serial.println(" Connected to Wi-Fi!");
+    Serial.print("ESP32 IP Address: ");
+    Serial.println(WiFi.localIP());
+
+    if (MDNS.begin("esp32-FTM")) {
+      Serial.println(" mDNS started: http://esp32-FTM.local");
+      mDNSStarted = true;
+    } else {
+      Serial.println(" Failed to start mDNS");
+    }
+  } else {
+    Serial.println(" Failed to connect. Starting fallback AP...");
+    WiFi.softAP("ESP32-DirectConnect", "12345678");
+    Serial.print("AP IP Address: ");
+    Serial.println(WiFi.softAPIP());
+  }
+
+  // Initialize SPIFFS
+  if (!SPIFFS.begin(true)) {
+    Serial.println("An Error has occurred while mounting SPIFFS");
+    return;
+  }
+  loadConfigurationsFromSPIFFS(); // Load configs on startup
+
+  // Server routes
+  server.on("/", handleLogin);
+  server.on("/login", HTTP_POST, handleLoginPost);
+  server.on("/logout", handleLogout);
+  server.on("/home", handleHomeRouter);
+  server.on("/page1", handlePage1);
+  server.on("/page2", handlePage2);
+  server.on("/load-selected-config", handleLoadSelectedConfig);
+  server.on("/delete-config-page", handleDeleteConfigPage);
+  server.on("/delete-selected-config", handleDeleteSelectedConfig);
+  server.on("/confirm-delete-config", handleConfirmDeleteConfig);
+
+  // New routes for process control
+  server.on("/process", handleProcessPage);
+  server.on("/start-process", HTTP_GET, []() {
+    if (isLoggedIn && currentConfigName != "No Configuration Loaded") {
+      processStatus = "Running";
+      processStartTime = millis();
+      supplyIsOn = true; // Turn on supply
+      angle = 0; // Reset angle for a new test run on the server side
+      // No need to send "RESET_CHART" from here, client will do it on start button click
+      Serial.println("Process Started");
+      server.send(200, "text/plain", "Process Started");
+    } else {
+      server.send(400, "text/plain", "No configuration loaded or not logged in.");
+    }
+  });
+
+  server.on("/pause-process", HTTP_GET, []() {
+    if (isLoggedIn && processStatus == "Running") {
+      processStatus = "Paused";
+      processPauseTime = millis();
+      supplyIsOn = false; // Turn off supply
+      Serial.println("Process Paused");
+      server.send(200, "text/plain", "Process Paused");
+    } else {
+      server.send(400, "text/plain", "Process not running or not logged in.");
+    }
+  });
+
+  server.on("/stop-process", HTTP_GET, []() {
+    if (isLoggedIn && (processStatus == "Running" || processStatus == "Paused")) {
+      processStatus = "Stopped";
+      remainingTimeSeconds = 0;
+      simulatedVoltageReading = 0.0;
+      simulatedCurrentReading = 0.0;
+      supplyIsOn = false; // Turn off supply
+      angle = 0; // Reset angle on stop
+      servo.write(0); // Return servo to initial position
+      Serial.println("Process Stopped");
+      server.send(200, "text/plain", "Process Stopped");
+    } else {
+      server.send(400, "text/plain", "Process not active or not logged in.");
+    }
+  });
+
+  // Endpoint to send real-time process data (for the "Real-Time Values" section)
+  server.on("/get-process-status", HTTP_GET, []() {
+    String json = "{";
+    json += "\"processStatus\":\"" + processStatus + "\",";
+    json += "\"remainingTime\":\"";
+    int minutes = remainingTimeSeconds / 60;
+    int seconds = remainingTimeSeconds % 60;
+    char timeBuffer[6];
+    sprintf(timeBuffer, "%02d:%02d", minutes, seconds);
+    json += String(timeBuffer) + "\",";
+    json += "\"simulatedVoltageReading\":" + String(simulatedVoltageReading, 2) + ",";
+    json += "\"simulatedCurrentReading\":" + String(simulatedCurrentReading, 2);
+    json += "}";
+    server.send(200, "application/json", json);
+  });
+
+  server.begin();
+
+  // Initialize WebSocket server
+  webSocket.begin();
+  webSocket.onEvent(webSocketEvent); // Register the event handler
+
+  // Initialize servo
+  servo.attach(SERVO_PIN);
+  servo.write(0); // Set initial position
+}
+
+void loop() {
+
+// Wi-Fi reset button logic (hold for 3 seconds)
+static bool buttonPressed = false;
+static unsigned long buttonPressTime = 0;
+
+if (digitalRead(RESET_BUTTON_PIN) == LOW) {
+  if (!buttonPressed) {
+    buttonPressed = true;
+    buttonPressTime = millis();
+    Serial.println("Reset button pressed. Hold for 3 seconds...");
+  } else if (millis() - buttonPressTime > 3000) {
+    Serial.println("⏱ Long press detected — Resetting Wi-Fi settings...");
+    WiFiManager wm;
+    wm.resetSettings();
+    delay(500);
+    ESP.restart();
+  }
+} else {
+  buttonPressed = false;
+}
+  
+  server.handleClient();
+  webSocket.loop(); // Process WebSocket events
+
+  // Process simulation logic
+  if (processStatus == "Running") {
+    // Update real-time values (voltage, current, remaining time)
+    if (millis() - lastRealTimeUpdate >= 100) { // Update every 100ms
+      // Simulate voltage and current based on current angle/displacement
+      float displacement = angle * DEGREE_TO_DISPLACEMENT;
+      // Ensure displacement does not exceed a reasonable max based on angle limit
+      if (displacement > (currentAngle.toInt() * DEGREE_TO_DISPLACEMENT)) {
+          displacement = currentAngle.toInt() * DEGREE_TO_DISPLACEMENT;
+      }
+      simulatedVoltageReading = 3.3 * (displacement / 10.0); // Example: voltage increases with displacement
+      simulatedCurrentReading = 0.5 * (displacement / 10.0); // Example: current increases with displacement
+
+      // Update remaining time
+      unsigned long elapsed = (millis() - processStartTime) / 1000;
+      if (processDurationSeconds > elapsed) {
+        remainingTimeSeconds = processDurationSeconds - elapsed;
+      } else {
+        remainingTimeSeconds = 0;
+        processStatus = "Completed"; // Mark as completed
+        supplyIsOn = false;
+        simulatedVoltageReading = 0.0;
+        simulatedCurrentReading = 0.0;
+        servo.write(0); // Return servo to initial position
+        Serial.println("Process Completed!");
+      }
+      lastRealTimeUpdate = millis();
+    }
+
+    // Send simulated data to WebSocket for graph
+    if (millis() - lastStepTime >= 300) { // Send data point every 300ms
+      if (angle <= currentAngle.toInt()) { // Continue until simulated angle reaches config angle
+        servo.write(angle); // Move servo
+        float displacement = angle * DEGREE_TO_DISPLACEMENT;
+        float force = SPRING_CONSTANT * displacement * displacement;
+        force += random(-20, 20); // Add some noise
+
+        String message = String(displacement, 4) + "," + String(force, 2);
+        webSocket.broadcastTXT(message); // Send data to all connected WebSocket clients
+        angle++;
+        lastStepTime = millis();
+      } else {
+        // If the angle limit is reached, and process is still running (time-based)
+        // ensure the servo stays at max angle until process is completed by time.
+        // Or, if angle completion means process completion, set status here.
+        // For now, let the time-based completion handle the "Completed" status.
+      }
+    }
+  } else if (processStatus == "Paused") {
+    // Do nothing, or handle specific pause logic (e.g., maintain servo position)
+  } else if (processStatus == "Stopped" || processStatus == "Completed" || processStatus == "Ready") {
+    // Ensure servo is at 0 when not running
+    if (servo.read() != 0) {
+      servo.write(0);
+    }
+  }
+}
