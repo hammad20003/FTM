@@ -6,24 +6,46 @@
 #include <WebServer.h>
 #include <ESP32Servo.h>
 #include <WiFiManager.h>
-#include <ArduinoJson.h>
+#include <ArduinoJson.h>      // Updated for ArduinoJson v6
 #include <WebSocketsServer.h> // New include for WebSockets
+#include "HX711.h"            // New include for HX711 load cell amplifier
 
- // New include for Servo control
-
-// WiFi network credentials
-const char* ssid = "hadi";
-const char* password = "12345678";
+// WiFi network credentials (handled by WiFiManager, so commented out)
+//const char* ssid = "hadi";
+//const char* password = "12345678";
 
 WebServer server(80);
 WebSocketsServer webSocket = WebSocketsServer(81); // WebSocket server on port 81
 
-Servo servo; // Servo object
-const int SERVO_PIN = 13; // Pin for servo control
+// --- Load cell pins and calibration ---
+#define DT_PIN 3  // Data pin for HX711
+#define SCK_PIN 2 // Clock pin for HX711
+HX711 scale;
+float calibration_factor = -475.31; // Calibration factor for your load cell
 
-// Test parameters for simulation
-const float DEGREE_TO_DISPLACEMENT = 0.0216; // cm/degree (simulated)
-const float SPRING_CONSTANT = 150.0;        // simulated stiffness (g/cm^2, or similar unit)
+// --- Stepper Motor Pins ---
+const int STEP_PIN = 19;
+const int DIR_PIN = 18;
+const int ENABLE_PIN = 5;
+const int stepsPerRevolution = 400;
+float distancePerStep = 9.11 / 400.0; // cm per step for the stepper motor
+
+// Set this to 'true' if your stepper driver's ENABLE pin is active HIGH (e.g., HIGH enables, LOW disables).
+// Set to 'false' if your stepper driver's ENABLE pin is active LOW (e.g., LOW enables, HIGH disables - common for A4988/DRV8825).
+const bool STEPPER_ENABLE_ACTIVE_HIGH = true; 
+
+// Base delay for stepper motor pulses (microseconds). Smaller value = faster.
+// Adjust this value to control the overall speed range.
+const unsigned long BASE_STEPPER_DELAY_US = 500; 
+
+// --- Servo Motor ---
+#define SERVO_PIN 7 // Pin for servo control (Updated from 13 to 7)
+Servo myServo;      // Servo object (Renamed from 'servo' to 'myServo')
+const int SERVO_RETRACT_ANGLE = 0;        // Angle for servo retracted position
+const int SERVO_APPLY_PRESSURE_ANGLE = 90; // Angle for servo applying pressure (example)
+
+// Test parameters for simulation (re-added for graph displacement calculation)
+const float DEGREE_TO_DISPLACEMENT = 0.0216; // cm/degree (simulated, used for graph X-axis)
 
 // Session state
 bool isLoggedIn = false;
@@ -44,7 +66,7 @@ std::vector<Configuration> configurations;
 String currentConfigName = "No Configuration Loaded";
 String currentDistance = "N/A";
 String currentAngle = "N/A";
-String currentSpeed = "N/A";
+String currentSpeed = "N/A"; // Added to hold the speed setting
 
 // Selected configuration for deletion
 String selectedConfigNameForDelete = "No Configuration Selected";
@@ -63,16 +85,29 @@ unsigned long processPauseTime = 0;
 unsigned long processDurationSeconds = 0; // Duration based on 'angle' config
 unsigned long remainingTimeSeconds = 0;
 bool supplyIsOn = false;
-float simulatedVoltageReading = 0.0;
-float simulatedCurrentReading = 0.0;
-unsigned long lastRealTimeUpdate = 0; // For updating voltage/current and remaining time
+float simulatedVoltageReading = 0.0; // No longer simulated, but kept for JSON structure
+float simulatedCurrentReading = 0.0; // No longer simulated, but kept for JSON structure
+unsigned long lastRealTimeUpdate = 0; // For updating remaining time
 unsigned long lastStepTime = 0;       // For sending data points to WebSocket
 
-int angle = 0; // Current angle for the simulated test, used for graph data
+int angle = 0; // Current angle for the simulated test, used for graph data (servo position)
+
+// For storing readings history (for Service Mode)
+String forceHistory = "";
+int readingCounter = 0;
+
+// --- Physical Reset Button ---
+#define RESET_BUTTON_PIN 4
+unsigned long buttonPressTime = 0;
+bool buttonPressed = false;
+
+// mDNS status flag (re-added)
+bool mDNSStarted = false;
 
 // Convert all configurations to JSON string
 String serializeAllConfigsToJson(const std::vector<Configuration>& configs) {
-  DynamicJsonDocument doc(1024);
+  // Use StaticJsonDocument for fixed size, or adjust size as needed
+  StaticJsonDocument<1024> doc; 
   JsonArray jsonArray = doc.to<JsonArray>();
 
   for (const auto& config : configs) {
@@ -90,7 +125,8 @@ String serializeAllConfigsToJson(const std::vector<Configuration>& configs) {
 
 // Populate configurations from JSON string
 bool deserializeJsonToAllConfigs(const String& jsonString, std::vector<Configuration>& configs) {
-  DynamicJsonDocument doc(1024);
+  // Use StaticJsonDocument for fixed size, or or adjust size as needed
+  StaticJsonDocument<1024> doc;
   DeserializationError error = deserializeJson(doc, jsonString);
 
   if (error) {
@@ -153,7 +189,7 @@ void loadConfigurationsFromSPIFFS() {
   }
 }
 
-// Display a simple message box
+// Display a simple message box (custom modal alternative to alert/confirm)
 void showMessageBox(const String& title, const String& message, const String& backLink) {
   String html = R"rawliteral(
 <!DOCTYPE html>
@@ -425,7 +461,7 @@ void handlePage1() {
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Distance (cm)</label>
-                    <p class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%CURRENT_DISTANCE%</p>
+                    <p class="mt-1 block w-full bg-gray-100 border border-gray-300 rounded-md shadow-sm p-2 text-gray-800">%CURRENT_DISTANCE%cm</p>
                 </div>
                 <div>
                     <label class="block text-sm font-medium text-gray-700 mb-1">Angle</label>
@@ -593,13 +629,13 @@ void handleLoadSelectedConfig() {
       currentConfigName = configurations[index].name;
       currentDistance = configurations[index].distance;
       currentAngle = configurations[index].angle;
-      currentSpeed = configurations[index].speed;
+      currentSpeed = configurations[index].speed; // Load speed here
       processDurationSeconds = currentAngle.toInt(); // Angle maps to process duration
       remainingTimeSeconds = processDurationSeconds;
       processStatus = "Ready";
       supplyIsOn = false;
-      simulatedVoltageReading = 0.0;
-      simulatedCurrentReading = 0.0;
+      simulatedVoltageReading = 0.0; // Reset simulated values
+      simulatedCurrentReading = 0.0; // Reset simulated values
     }
   }
   handlePage1();
@@ -1069,7 +1105,13 @@ void handleProcessPage() {
         document.getElementById('startButton').addEventListener('click', () => {
             fetch('/start-process')
                 .then(response => response.text())
-                .then(message => console.log(message))
+                .then(message => {
+                    console.log(message);
+                    // Clear chart data when starting a new process
+                    chartData.labels = [];
+                    chartData.datasets[0].data = [];
+                    flexuralChart.update();
+                })
                 .catch(error => console.error('Error starting process:', error));
         });
 
@@ -1090,7 +1132,7 @@ void handleProcessPage() {
     </script>
 </body>
 </html>
-)rawliteral";
+  )rawliteral";
 
   // Replace placeholders with current configuration and process data
   html.replace("%CURRENT_CONFIG_NAME%", currentConfigName);
@@ -1105,10 +1147,276 @@ void handleProcessPage() {
   sprintf(timeBuffer, "%02d:%02d", minutes, seconds);
   html.replace("%REMAINING_TIME_MM_SS%", String(timeBuffer));
 
-  html.replace("%PROCESS_STATUS%", processStatus);
+  // Simulated voltage/current are now 0.0 as they are not real readings
   html.replace("%SIMULATED_VOLTAGE%", String(simulatedVoltageReading, 2));
   html.replace("%SIMULATED_CURRENT%", String(simulatedCurrentReading, 2));
 
+  server.send(200, "text/html", html);
+}
+
+// --- Functions for Stepper, Servo, and Load Cell Control ---
+void moveStepper(float cmToMove) {
+  // Determine direction: LOW for positive movement (forward), HIGH for negative movement (backward)
+  // You might need to invert LOW/HIGH here if your motor spins the wrong way for a given direction.
+  int direction = (cmToMove >= 0) ? LOW : HIGH;
+  digitalWrite(DIR_PIN, direction);
+  
+  long steps = abs(cmToMove) / distancePerStep;
+
+  Serial.print("Moving stepper ");
+  Serial.print(cmToMove);
+  Serial.print(" cm (");
+  Serial.print(steps);
+  Serial.println(" steps)");
+
+  // Calculate step delay based on configured speed
+  unsigned long stepperPulseDelay = BASE_STEPPER_DELAY_US; // Default to 1x speed
+  if (currentSpeed == "1.5x") {
+    stepperPulseDelay = BASE_STEPPER_DELAY_US * 0.75; // Adjust factor for 1.5x speed (smaller delay = faster)
+  } else if (currentSpeed == "2x") {
+    stepperPulseDelay = BASE_STEPPER_DELAY_US / 2; // Adjust factor for 2x speed (smaller delay = faster)
+  }
+  // If speed is "1x" or unrecognized, it defaults to BASE_STEPPER_DELAY_US
+
+
+  // ENABLE_PIN: Control based on STEPPER_ENABLE_ACTIVE_HIGH flag
+  digitalWrite(ENABLE_PIN, STEPPER_ENABLE_ACTIVE_HIGH ? HIGH : LOW); // Enable stepper driver
+  delay(10); // Small delay for enable to take effect
+
+  for (long i = 0; i < steps; i++) {
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(stepperPulseDelay); 
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(stepperPulseDelay); 
+  }
+
+  // Disable stepper driver after movement
+  digitalWrite(ENABLE_PIN, STEPPER_ENABLE_ACTIVE_HIGH ? LOW : HIGH); 
+  Serial.println("Stepper move complete.");
+}
+
+void moveTubeOnly(float distance) {
+  moveStepper(distance);
+}
+
+// Function to perform a small, slow stepper move for testing
+void testStepperMove() {
+  Serial.println("Performing a test stepper move (1cm forward, slow speed)...");
+  int direction = LOW; // Forward direction
+  digitalWrite(DIR_PIN, direction);
+  
+  long steps = 1.0 / distancePerStep; // Move 1 cm
+
+  digitalWrite(ENABLE_PIN, STEPPER_ENABLE_ACTIVE_HIGH ? HIGH : LOW); // Enable stepper driver
+  delay(10); // Small delay for enable to take effect
+
+  for (long i = 0; i < steps; i++) {
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(1500); // Slower speed for testing
+    digitalWrite(STEP_PIN, LOW);
+    delayMicroseconds(1500); 
+  }
+
+  digitalWrite(ENABLE_PIN, STEPPER_ENABLE_ACTIVE_HIGH ? LOW : HIGH); // Disable stepper driver
+  Serial.println("Test stepper move complete.");
+}
+
+
+void sendCurrentForce() {
+  if (scale.is_ready()) {
+    float grams = scale.get_units(10); // Get average of 10 readings
+    float newtons = grams * 0.00980665; // Convert grams to Newtons
+    readingCounter++;
+    forceHistory += String(readingCounter) + ": " + String(newtons, 3) + " N\n";
+    Serial.println("Measured Force: " + String(newtons, 3) + " N");
+  } else {
+    Serial.println("HX711 not ready for force reading.");
+    readingCounter++;
+    forceHistory += String(readingCounter) + ": HX711 not ready\n";
+  }
+}
+
+void moveServo(int angle) {
+  Serial.print("Moving servo to ");
+  Serial.print(angle);
+  Serial.println(" degrees.");
+  myServo.write(angle);
+  delay(1000); // Give servo time to reach position
+}
+
+// Handle Service Mode page (for direct control of hardware)
+void handleServiceMode() {
+  if (!isLoggedIn || !isAdmin) { // Only admin can access service mode
+    server.sendHeader("Location", "/home");
+    server.send(302, "text/plain", "");
+    return;
+  }
+
+  String html = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FTM-01 Service Mode</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style> body { font-family: 'Inter', sans-serif; background-color: #f0f4f8; } </style>
+</head>
+<body class="min-h-screen flex flex-col">
+    <header class="w-full bg-white shadow-sm p-4">
+        <nav class="container mx-auto flex items-center justify-between">
+            <div class="flex items-center space-x-4">
+                <a href="/home" class="text-gray-600 hover:text-gray-900">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-6 h-6"> <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5L3 12m0 0l7.5-7.5M3 12h18" /> </svg>
+                </a>
+                <h1 class="text-xl font-semibold text-gray-800">Service Mode</h1>
+            </div>
+            <a href="/home" class="text-gray-600 hover:text-red-600">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor" class="w-6 h-6"> <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" /> </svg>
+            </a>
+        </nav>
+    </header>
+    <main class="flex-grow flex items-center justify-center p-4">
+        <div class="bg-white rounded-lg shadow-xl p-8 flex flex-col md:flex-row items-start space-y-8 md:space-y-0 md:space-x-12 max-w-4xl w-full">
+            <!-- Stepper Control -->
+            <div class="flex-1 w-full space-y-4">
+                <h2 class="text-xl font-semibold text-gray-800 mb-2">Stepper Motor Control</h2>
+                <div class="space-y-2">
+                    <button onclick="sendStepperCommand('/move10cm_only')" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-md shadow-md transition duration-300">Move 10cm</button>
+                    <button onclick="sendStepperCommand('/move30cm_only')" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-md shadow-md transition duration-300">Move 30cm</button>
+                    <button onclick="sendStepperCommand('/move60cm_only')" class="w-full bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-md shadow-md transition duration-300">Move 60cm</button>
+                    <div class="flex space-x-2">
+                        <input type="number" id="customDistance" placeholder="Custom cm" class="flex-1 border-gray-300 rounded-md shadow-sm p-2">
+                        <button onclick="sendCustomStepperCommand()" class="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-2 px-4 rounded-md shadow-md transition duration-300">Move Custom</button>
+                    </div>
+                    <button onclick="sendCommand('/test-stepper-move')" class="w-full bg-gray-600 hover:bg-gray-700 text-white font-semibold py-2 px-4 rounded-md shadow-md transition duration-300">Test Stepper (1cm Slow)</button>
+                </div>
+            </div>
+
+            <!-- Servo Control -->
+            <div class="flex-1 w-full space-y-4">
+                <h2 class="text-xl font-semibold text-gray-800 mb-2">Servo Motor Control</h2>
+                <div class="space-y-2">
+                    <button onclick="sendServoCommand(0)" class="w-full bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-md shadow-md transition duration-300">Retract (0°)</button>
+                    <button onclick="sendServoCommand(90)" class="w-full bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-md shadow-md transition duration-300">Apply Pressure (90°)</button>
+                    <div class="flex space-x-2">
+                        <input type="number" id="customServoAngle" placeholder="Custom Angle (0-180)" class="flex-1 border-gray-300 rounded-md shadow-sm p-2" min="0" max="180">
+                        <button onclick="sendCustomServoCommand()" class="bg-green-500 hover:bg-green-600 text-white font-semibold py-2 px-4 rounded-md shadow-md transition duration-300">Set Custom Angle</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Load Cell Readings -->
+            <div class="flex-1 w-full space-y-4">
+                <h2 class="text-xl font-semibold text-gray-800 mb-2">Load Cell Readings</h2>
+                <div class="space-y-2">
+                    <button onclick="readForce()" class="w-full bg-purple-500 hover:bg-purple-600 text-white font-semibold py-2 px-4 rounded-md shadow-md transition duration-300">Read Current Force</button>
+                    <p class="text-lg font-bold text-gray-900">Current Force: <span id="currentForce">N/A</span> N</p>
+                    <button onclick="getForceHistory()" class="w-full bg-purple-500 hover:bg-purple-600 text-white font-semibold py-2 px-4 rounded-md shadow-md transition duration-300">Get Force History</button>
+                    <pre id="forceHistory" class="bg-gray-100 p-3 rounded-md text-sm overflow-auto h-48">No history yet.</pre>
+                    <button onclick="resetForceData()" class="w-full bg-red-500 hover:bg-red-600 text-white font-semibold py-2 px-4 rounded-md shadow-md transition duration-300">Reset Force Data</button>
+                </div>
+            </div>
+        </div>
+    </main>
+    <script>
+        async function sendCommand(url) {
+            try {
+                const response = await fetch(url);
+                const message = await response.text();
+                console.log(message);
+                // Optionally, update UI with success/error message
+            } catch (error) {
+                console.error('Error sending command:', error);
+            }
+        }
+
+        function sendStepperCommand(path) {
+            sendCommand(path);
+        }
+
+        function sendCustomStepperCommand() {
+            const distance = document.getElementById('customDistance').value;
+            if (distance) {
+                sendCommand('/move_custom_cm_only?distance=' + distance);
+            } else {
+                // Using a custom message box instead of alert()
+                alert('Please enter a distance.'); // Keeping alert for simplicity in service mode, but ideally custom modal
+            }
+        }
+
+        function sendServoCommand(angle) {
+            sendCommand('/move_servo?angle=' + angle);
+        }
+
+        function sendCustomServoCommand() {
+            const angle = document.getElementById('customServoAngle').value;
+            if (angle !== '' && angle >= 0 && angle <= 180) {
+                sendCommand('/move_servo?angle=' + angle);
+            } else {
+                // Using a custom message box instead of alert()
+                alert('Please enter a valid angle (0-180).'); // Keeping alert for simplicity in service mode, but ideally custom modal
+            }
+        }
+
+        async function readForce() {
+            try {
+                const response = await fetch('/read_force');
+                const message = await response.text();
+                // The /read_force endpoint just triggers a print to serial and updates server-side history.
+                // We rely on getForceHistory to retrieve and display the actual force.
+                console.log(message);
+            } catch (error) {
+                console.error('Error reading force:', error);
+            }
+        }
+
+        async function getForceHistory() {
+            try {
+                const response = await fetch('/get_history');
+                const history = await response.text();
+                document.getElementById('forceHistory').textContent = history || 'No history yet.';
+                // If the last line of history is the current force, update currentForce span
+                const lines = history.trim().split('\n');
+                if (lines.length > 0 && lines[lines.length - 1].includes('N')) {
+                    const lastLine = lines[lines.length - 1];
+                    const match = lastLine.match(/([\d\.]+)\sN/);
+                    if (match) {
+                        document.getElementById('currentForce').textContent = match[1];
+                    } else {
+                        document.getElementById('currentForce').textContent = 'N/A';
+                    }
+                } else {
+                    document.getElementById('currentForce').textContent = 'N/A';
+                }
+
+            } catch (error) {
+                console.error('Error fetching force history:', error);
+                document.getElementById('forceHistory').textContent = 'Failed to load history.';
+            }
+        }
+
+        async function resetForceData() {
+            try {
+                const response = await fetch('/reset_force_data');
+                const message = await response.text();
+                console.log(message);
+                document.getElementById('forceHistory').textContent = 'No history yet.';
+                document.getElementById('currentForce').textContent = 'N/A';
+            } catch (error) {
+                console.error('Error resetting force data:', error);
+            }
+        }
+
+        // Initial load of force history
+        document.addEventListener('DOMContentLoaded', getForceHistory);
+        // Refresh force history periodically
+        setInterval(getForceHistory, 2000); // Refresh every 2 seconds
+    </script>
+</body>
+</html>
+  )rawliteral";
   server.send(200, "text/html", html);
 }
 
@@ -1129,8 +1437,7 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
       Serial.printf("[%u] get Text: %s\n", num, payload);
       // If the client sends "RESET_CHART", clear server-side angle for a fresh start
       if (String((char*)payload) == "RESET_CHART") {
-          angle = 0; // Reset angle for a new test run
-          // testRunning = true; // This is now controlled by /start-process
+          angle = 0; // Reset angle for a new test run on the server side
           Serial.println("Chart reset requested by client.");
       }
       break;
@@ -1140,16 +1447,29 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
 }
 
 
-#define RESET_BUTTON_PIN 4
-
-bool mDNSStarted = false;
-bool buttonPressed = false;
-unsigned long buttonPressTime = 0;
-
-
 void setup() {
   Serial.begin(115200);
   pinMode(RESET_BUTTON_PIN, INPUT_PULLUP);
+
+  // --- Load Cell Setup ---
+  scale.begin(DT_PIN, SCK_PIN);
+  scale.set_scale(calibration_factor);
+  scale.tare(); // Calibrate/zero the scale
+  Serial.println("Load cell ready.");
+
+  // --- Stepper Motor Setup ---
+  pinMode(STEP_PIN, OUTPUT);
+  pinMode(DIR_PIN, OUTPUT);
+  pinMode(ENABLE_PIN, OUTPUT);
+  // Set initial state of ENABLE pin based on configuration
+  digitalWrite(ENABLE_PIN, STEPPER_ENABLE_ACTIVE_HIGH ? LOW : HIGH); // Disable stepper by default
+  Serial.println("Stepper motor pins initialized.");
+
+  // --- Servo Motor Setup ---
+  myServo.attach(SERVO_PIN);
+  myServo.write(SERVO_RETRACT_ANGLE); // Set initial position
+  Serial.println("Servo ready.");
+
 
   // === WiFi Setup with WiFiManager ===
   WiFiManager wm;
@@ -1197,13 +1517,25 @@ void setup() {
   server.on("/process", handleProcessPage);
   server.on("/start-process", HTTP_GET, []() {
     if (isLoggedIn && currentConfigName != "No Configuration Loaded") {
+      // 1. Move stepper motor to the specified distance
+      float distanceToMove = currentDistance.toFloat();
+      if (distanceToMove > 0) { // Only move if distance is positive
+        Serial.print("Moving stepper to configured distance: ");
+        Serial.print(distanceToMove);
+        Serial.println(" cm");
+        moveStepper(distanceToMove); // Blocking call, waits for stepper to finish
+        Serial.println("Stepper movement complete. Starting process.");
+      } else {
+        Serial.println("No valid distance configured for stepper, skipping stepper move.");
+      }
+
+      // 2. Then, start the rest of the process
       processStatus = "Running";
       processStartTime = millis();
-      supplyIsOn = true; // Turn on supply
+      supplyIsOn = true; // Turn on supply (conceptual)
       angle = 0; // Reset angle for a new test run on the server side
-      // No need to send "RESET_CHART" from here, client will do it on start button click
       Serial.println("Process Started");
-      server.send(200, "text/plain", "Process Started");
+      server.send(200, "text/plain", "Process Started (Stepper moved first)");
     } else {
       server.send(400, "text/plain", "No configuration loaded or not logged in.");
     }
@@ -1213,7 +1545,7 @@ void setup() {
     if (isLoggedIn && processStatus == "Running") {
       processStatus = "Paused";
       processPauseTime = millis();
-      supplyIsOn = false; // Turn off supply
+      supplyIsOn = false; // Turn off supply (conceptual)
       Serial.println("Process Paused");
       server.send(200, "text/plain", "Process Paused");
     } else {
@@ -1225,11 +1557,11 @@ void setup() {
     if (isLoggedIn && (processStatus == "Running" || processStatus == "Paused")) {
       processStatus = "Stopped";
       remainingTimeSeconds = 0;
-      simulatedVoltageReading = 0.0;
-      simulatedCurrentReading = 0.0;
-      supplyIsOn = false; // Turn off supply
+      simulatedVoltageReading = 0.0; // Reset simulated values
+      simulatedCurrentReading = 0.0; // Reset simulated values
+      supplyIsOn = false; // Turn off supply (conceptual)
       angle = 0; // Reset angle on stop
-      servo.write(0); // Return servo to initial position
+      myServo.write(SERVO_RETRACT_ANGLE); // Return servo to initial position
       Serial.println("Process Stopped");
       server.send(200, "text/plain", "Process Stopped");
     } else {
@@ -1247,60 +1579,110 @@ void setup() {
     char timeBuffer[6];
     sprintf(timeBuffer, "%02d:%02d", minutes, seconds);
     json += String(timeBuffer) + "\",";
-    json += "\"simulatedVoltageReading\":" + String(simulatedVoltageReading, 2) + ",";
-    json += "\"simulatedCurrentReading\":" + String(simulatedCurrentReading, 2);
+    json += "\"simulatedVoltageReading\":" + String(simulatedVoltageReading, 2) + ","; // Will be 0.0
+    json += "\"simulatedCurrentReading\":" + String(simulatedCurrentReading, 2); // Will be 0.0
     json += "}";
     server.send(200, "application/json", json);
   });
 
-  server.begin();
-
-  // Initialize WebSocket server
-  webSocket.begin();
-  webSocket.onEvent(webSocketEvent); // Register the event handler
-
-  // Initialize servo
-  servo.attach(SERVO_PIN);
-  servo.write(0); // Set initial position
-}
-
-void loop() {
-
-// Wi-Fi reset button logic (hold for 3 seconds)
-static bool buttonPressed = false;
-static unsigned long buttonPressTime = 0;
-
-if (digitalRead(RESET_BUTTON_PIN) == LOW) {
-  if (!buttonPressed) {
-    buttonPressed = true;
-    buttonPressTime = millis();
-    Serial.println("Reset button pressed. Hold for 3 seconds...");
-  } else if (millis() - buttonPressTime > 3000) {
-    Serial.println("⏱ Long press detected — Resetting Wi-Fi settings...");
+  // --- Service Mode Endpoints (New) ---
+  server.on("/service-mode", handleServiceMode); // Route for the new service mode page
+  server.on("/get_history", []() {
+    server.send(200, "text/plain", forceHistory);
+  });
+  server.on("/move10cm_only", []() {
+    moveTubeOnly(10.0);
+    server.send(200, "text/plain", "OK");
+  });
+  server.on("/move30cm_only", []() {
+    moveTubeOnly(30.0);
+    server.send(200, "text/plain", "OK");
+  });
+  server.on("/move60cm_only", []() {
+    moveTubeOnly(60.0);
+    server.send(200, "text/plain", "OK");
+  });
+  server.on("/move_custom_cm_only", HTTP_GET, []() {
+    if (server.hasArg("distance")) {
+      float distance = server.arg("distance").toFloat();
+      moveTubeOnly(distance);
+      server.send(200, "text/plain", "OK");
+    } else {
+      server.send(400, "text/plain", "Missing distance parameter");
+    }
+  });
+  server.on("/test-stepper-move", HTTP_GET, []() { // New endpoint for testing stepper
+    testStepperMove();
+    server.send(200, "text/plain", "Test stepper move initiated.");
+  });
+  server.on("/read_force", []() {
+    sendCurrentForce();
+    server.send(200, "text/plain", "OK");
+  });
+  server.on("/move_servo", HTTP_GET, []() {
+    if (server.hasArg("angle")) {
+      int angle = server.arg("angle").toInt();
+      if (angle >= 0 && angle <= 180) {
+        moveServo(angle);
+        server.send(200, "text/plain", "OK");
+      } else {
+        server.send(400, "text/plain", "Invalid angle (0-180 allowed)");
+      }
+    } else {
+      server.send(400, "text/plain", "Missing angle parameter");
+    }
+  });
+  server.on("/reset_force_data", []() {
+    forceHistory = "";
+    readingCounter = 0;
+    server.send(200, "text/plain", "OK");
+  });
+  server.on("/reset", []() { // This endpoint for full WiFi reset and reboot
+    server.send(200, "text/plain", "Resetting Wi-Fi and rebooting...");
+    delay(1000);
     WiFiManager wm;
     wm.resetSettings();
     delay(500);
     ESP.restart();
-  }
-} else {
-  buttonPressed = false;
+  });
+
+
+  server.begin();
+  Serial.println("Web server started.");
+
+  // Initialize WebSocket server
+  webSocket.begin();
+  webSocket.onEvent(webSocketEvent); // Register the event handler
 }
+
+void loop() {
+  // Wi-Fi reset button logic (hold for 3 seconds)
+  if (digitalRead(RESET_BUTTON_PIN) == LOW) {
+    if (!buttonPressed) {
+      buttonPressed = true;
+      buttonPressTime = millis();
+      Serial.println("Reset button pressed. Hold for 3 seconds...");
+    } else if (millis() - buttonPressTime > 3000) {
+      Serial.println("⏱ Long press detected — Resetting Wi-Fi settings...");
+      WiFiManager wm;
+      wm.resetSettings();
+      delay(500);
+      ESP.restart();
+    }
+  } else {
+    buttonPressed = false;
+  }
   
   server.handleClient();
   webSocket.loop(); // Process WebSocket events
 
-  // Process simulation logic
+  // Process simulation logic (now with real hardware interaction)
   if (processStatus == "Running") {
-    // Update real-time values (voltage, current, remaining time)
+    // Update real-time values (remaining time)
     if (millis() - lastRealTimeUpdate >= 100) { // Update every 100ms
-      // Simulate voltage and current based on current angle/displacement
-      float displacement = angle * DEGREE_TO_DISPLACEMENT;
-      // Ensure displacement does not exceed a reasonable max based on angle limit
-      if (displacement > (currentAngle.toInt() * DEGREE_TO_DISPLACEMENT)) {
-          displacement = currentAngle.toInt() * DEGREE_TO_DISPLACEMENT;
-      }
-      simulatedVoltageReading = 3.3 * (displacement / 10.0); // Example: voltage increases with displacement
-      simulatedCurrentReading = 0.5 * (displacement / 10.0); // Example: current increases with displacement
+      // Simulated voltage/current are no longer relevant, set to 0.0
+      simulatedVoltageReading = 0.0;
+      simulatedCurrentReading = 0.0;
 
       // Update remaining time
       unsigned long elapsed = (millis() - processStartTime) / 1000;
@@ -1309,40 +1691,49 @@ if (digitalRead(RESET_BUTTON_PIN) == LOW) {
       } else {
         remainingTimeSeconds = 0;
         processStatus = "Completed"; // Mark as completed
-        supplyIsOn = false;
-        simulatedVoltageReading = 0.0;
-        simulatedCurrentReading = 0.0;
-        servo.write(0); // Return servo to initial position
+        supplyIsOn = false; // Conceptual supply off
+        simulatedVoltageReading = 0.0; // Ensure display is zeroed
+        simulatedCurrentReading = 0.0; // Ensure display is zeroed
+        myServo.write(SERVO_RETRACT_ANGLE); // Return servo to initial position
         Serial.println("Process Completed!");
       }
       lastRealTimeUpdate = millis();
     }
 
-    // Send simulated data to WebSocket for graph
+    // Send real data to WebSocket for graph and control servo
     if (millis() - lastStepTime >= 300) { // Send data point every 300ms
-      if (angle <= currentAngle.toInt()) { // Continue until simulated angle reaches config angle
-        servo.write(angle); // Move servo
-        float displacement = angle * DEGREE_TO_DISPLACEMENT;
-        float force = SPRING_CONSTANT * displacement * displacement;
-        force += random(-20, 20); // Add some noise
+      if (angle <= currentAngle.toInt()) { // Continue until servo reaches target angle from config
+        myServo.write(angle); // Move servo to the current 'angle'
+        
+        // Read actual force from load cell
+        float grams = 0.0;
+        if (scale.is_ready()) {
+          grams = scale.get_units(10); // Get average of 10 readings
+        } else {
+          Serial.println("HX711 not ready for force reading. Using 0.0.");
+          // Optionally, handle error or use a default value
+        }
 
-        String message = String(displacement, 4) + "," + String(force, 2);
+        // Displacement for the graph is still based on the 'angle'
+        // This assumes 'angle' directly correlates to a physical displacement in your setup
+        float displacement = angle * DEGREE_TO_DISPLACEMENT;
+        String message = String(displacement, 4) + "," + String(grams, 2); // Send displacement and actual force (grams)
         webSocket.broadcastTXT(message); // Send data to all connected WebSocket clients
-        angle++;
+        
+        angle++; // Increment angle for next step
         lastStepTime = millis();
       } else {
         // If the angle limit is reached, and process is still running (time-based)
         // ensure the servo stays at max angle until process is completed by time.
-        // Or, if angle completion means process completion, set status here.
-        // For now, let the time-based completion handle the "Completed" status.
+        myServo.write(currentAngle.toInt()); // Keep servo at max angle
       }
     }
   } else if (processStatus == "Paused") {
     // Do nothing, or handle specific pause logic (e.g., maintain servo position)
   } else if (processStatus == "Stopped" || processStatus == "Completed" || processStatus == "Ready") {
     // Ensure servo is at 0 when not running
-    if (servo.read() != 0) {
-      servo.write(0);
+    if (myServo.read() != SERVO_RETRACT_ANGLE) {
+      myServo.write(SERVO_RETRACT_ANGLE);
     }
   }
 }
